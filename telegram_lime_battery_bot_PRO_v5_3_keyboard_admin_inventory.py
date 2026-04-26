@@ -1637,66 +1637,6 @@ def add_charging_job(text, chat_id):
     )
 
 
-
-def clock_report():
-    """
-    Zegarek: pokazuje odliczanie dla kierowców i ładowarek.
-    """
-    current = now()
-    lines = ["⏱️ ZEGAREK", ""]
-
-    db = load_db()
-    active = [trip for trip in db.get("trips", []) if trip.get("end") is None]
-
-    lines.append("🚗 KIEROWCY:")
-    if not active:
-        lines.append("Brak aktywnych tras.")
-    else:
-        for trip in active:
-            start = datetime.fromisoformat(trip["start"])
-            deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
-            left_minutes = int((deadline - current).total_seconds() // 60)
-
-            if left_minutes >= 0:
-                left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
-                state = "OK ✅"
-            else:
-                late = abs(left_minutes)
-                left_txt = f"po czasie {late // 60}h {late % 60}min"
-                state = "KONIEC CZASU ❌"
-
-            lines.append(
-                f"• {trip.get('driver', 'Nieznany')}: {trip.get('qty', 0)} baterii | "
-                f"start {fmt_dt(start)} | deadline {fmt_dt(deadline)} | {left_txt} | {state}"
-            )
-
-    lines.append("")
-    lines.append("🔋 ŁADOWARKI:")
-
-    jobs_data = load_jobs()
-    jobs = [j for j in jobs_data.get("jobs", []) if j.get("status") in ["charging", "alarm_sent"]]
-
-    if not jobs:
-        lines.append("Brak aktywnych ładowań.")
-    else:
-        for job in jobs:
-            ready_at = datetime.fromisoformat(job["ready_at"])
-            left_minutes = int((ready_at - current).total_seconds() // 60)
-
-            if left_minutes >= 0:
-                left_txt = f"gotowe za {left_minutes // 60}h {left_minutes % 60}min"
-            else:
-                late = abs(left_minutes)
-                left_txt = f"powinny być gotowe od {late // 60}h {late % 60}min"
-
-            lines.append(
-                f"• ID {job.get('id')}: {job.get('qty', 0)} baterii | "
-                f"gotowe {fmt_dt(ready_at)} | {left_txt}"
-            )
-
-    return "\n".join(lines)
-
-
 def charging_status():
     data = load_jobs()
     jobs = [j for j in data.get("jobs", []) if j.get("status") in ["charging", "alarm_sent"]]
@@ -1741,7 +1681,7 @@ def help_text():
         "Ogłoszenie → wpisz treść\n"
         "Alert → wpisz treść\n\n"
         "📊 RAPORT / STAN:\n"
-        "status / stan / zegarek / raport dzis / ranking dzis\n"
+        "status / stan / raport dzis / ranking dzis\n"
         "raport Jan Kowalski\n"
         "raport dzis Jan Kowalski\n"
         "raport tydzien Jan Kowalski\n"
@@ -1981,9 +1921,6 @@ def handle_command(text, user, chat_id):
     if t in ["status", "stan"]:
         return status_report()
 
-    if t in ["zegarek", "czas", "odliczanie"]:
-        return clock_report()
-
     if t.startswith("trasy") or t.startswith("aktywni"):
         return active_trips_text()
 
@@ -2118,12 +2055,7 @@ async def charging_scheduler(app: Application):
                 if not job.get("alarm_sent") and current >= alarm_at:
                     await app.bot.send_message(
                         chat_id=chat_id,
-                        text=(
-                            f"⏰ ZEGAREK ŁADOWANIA\n"
-                            f"🔋 Baterie będą gotowe za {ALARM_BEFORE_MINUTES} minut!\n"
-                            f"Ilość: {qty}\n"
-                            f"Gotowe o: {fmt_dt(ready_at)}"
-                        )
+                        text=f"🚨 Baterie będą gotowe za {ALARM_BEFORE_MINUTES} minut!\n🔋 Ilość: {qty}"
                     )
                     job["alarm_sent"] = True
                     job["status"] = "alarm_sent"
@@ -2133,12 +2065,7 @@ async def charging_scheduler(app: Application):
                     moved = move_charging_to_ready(qty)
                     await app.bot.send_message(
                         chat_id=chat_id,
-                        text=(
-                            f"✅ BATERIE NAŁADOWANE\n"
-                            f"🔋 Ilość: {moved}\n"
-                            f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
-                            f"{status_report()}"
-                        )
+                        text=f"✅ BATERIE GOTOWE\n🔋 Ilość: {moved}\n\n{status_report()}"
                     )
                     job["ready_sent"] = True
                     job["status"] = "done"
@@ -2163,95 +2090,17 @@ async def driver_alerts(app: Application):
             for trip in db["trips"]:
                 if trip.get("end") is None:
                     start = datetime.fromisoformat(trip["start"])
-                    deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
-                    qty = int(trip.get("qty", 0))
-                    driver = trip.get("driver", "Nieznany")
-                    chat_id = trip.get("chat_id") or load_group().get("chat_id")
+                    hours = (current - start).total_seconds() / 3600
 
-                    if not chat_id:
-                        continue
-
-                    left_minutes = int((deadline - current).total_seconds() // 60)
-
-                    # 60 minut do końca
-                    if left_minutes <= 60 and left_minutes > 15 and not trip.get("alert_60_sent"):
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"⏰ ZEGAREK KIEROWCY
-"
-                                f"🚗 {driver}
-"
-                                f"🔋 W trasie: {qty} baterii
-"
-                                f"Zostało około: {left_minutes} min
-"
-                                f"Deadline: {fmt_dt(deadline)}"
-                            )
-                        )
-                        trip["alert_60_sent"] = True
-                        changed = True
-
-                    # 15 minut do końca
-                    if left_minutes <= 15 and left_minutes >= 0 and not trip.get("alert_15_sent"):
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"🚨 ZA 15 MIN KONIEC CZASU
-"
-                                f"🚗 {driver}
-"
-                                f"🔋 W trasie: {qty} baterii
-"
-                                f"Zostało: {left_minutes} min
-"
-                                f"Deadline: {fmt_dt(deadline)}"
-                            )
-                        )
-                        trip["alert_15_sent"] = True
-                        changed = True
-
-                    # koniec czasu
-                    if left_minutes < 0 and not trip.get("alert_sent"):
-                        late = abs(left_minutes)
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"❌ SKOŃCZYŁ CI SIĘ CZAS
-"
-                                f"🚗 Kierowca: {driver}
-"
-                                f"🔋 Baterie w trasie: {qty}
-"
-                                f"Deadline był o: {fmt_dt(deadline)}
-"
-                                f"Spóźnienie: {late // 60}h {late % 60}min"
-                            )
-                        )
-                        trip["alert_sent"] = True
-                        trip["last_overdue_alert_at"] = current.isoformat()
-                        changed = True
-
-                    # co 30 min po czasie przypomnienie
-                    if left_minutes < -30 and trip.get("alert_sent"):
-                        last_iso = trip.get("last_overdue_alert_at")
-                        last_dt = datetime.fromisoformat(last_iso) if last_iso else start
-                        if (current - last_dt).total_seconds() >= 1800:
-                            late = abs(left_minutes)
+                    if hours >= TIME_LIMIT_HOURS and not trip.get("alert_sent"):
+                        chat_id = trip.get("chat_id") or load_group().get("chat_id")
+                        if chat_id:
                             await app.bot.send_message(
                                 chat_id=chat_id,
-                                text=(
-                                    f"🚨 NADAL PO CZASIE
-"
-                                    f"🚗 Kierowca: {driver}
-"
-                                    f"🔋 Baterie w trasie: {qty}
-"
-                                    f"Spóźnienie: {late // 60}h {late % 60}min"
-                                )
+                                text=f"🚨 UWAGA!\n{trip['driver']} kończy czas / jest spóźniony!\n⏱ Limit: {TIME_LIMIT_HOURS}h"
                             )
-                            trip["last_overdue_alert_at"] = current.isoformat()
-                            changed = True
+                        trip["alert_sent"] = True
+                        changed = True
 
             if changed:
                 save_db(db)
@@ -2260,6 +2109,7 @@ async def driver_alerts(app: Application):
             print("driver_alerts error:", e)
 
         await asyncio.sleep(60)
+
 
 
 async def weekly_report_scheduler(app: Application):
@@ -2300,14 +2150,9 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v6.6 działa...")
+    print("Telegram Lime Battery Bot PRO v6.5 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
