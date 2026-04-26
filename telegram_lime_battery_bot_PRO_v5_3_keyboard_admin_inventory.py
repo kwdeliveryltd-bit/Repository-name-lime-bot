@@ -14,10 +14,12 @@ DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
 GROUP_FILE = "telegram_group.json"
+DRIVER_CHECK_FILE = "telegram_driver_checks.json"
+WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
 # Przykład: ADMIN_IDS = {"123456789"}
-ADMIN_IDS = {"6030936882"}
+ADMIN_IDS = set()
 
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
@@ -107,6 +109,67 @@ def load_group():
 
 def save_group(chat_id):
     save_json(GROUP_FILE, {"chat_id": chat_id})
+
+def load_driver_checks():
+    return load_json(DRIVER_CHECK_FILE, {})
+
+
+def save_driver_checks(data):
+    save_json(DRIVER_CHECK_FILE, data)
+
+
+def mark_driver_inventory_check(user_id, fields):
+    data = load_driver_checks()
+    key = str(user_id)
+    current = set(data.get(key, []))
+    current.update(fields)
+    data[key] = sorted(current)
+    save_driver_checks(data)
+
+
+def get_driver_inventory_check(user_id):
+    return set(load_driver_checks().get(str(user_id), []))
+
+
+def reset_driver_inventory_check(user_id):
+    data = load_driver_checks()
+    key = str(user_id)
+    if key in data:
+        del data[key]
+        save_driver_checks(data)
+
+
+def inventory_fields_in_text(text):
+    t = normalize_text(text)
+    fields = set()
+    if find_number_near("gotowe|gotowych", t) is not None:
+        fields.add("gotowe")
+    if find_number_near("ladowarka|ladowarki|w ladowarkach|laduje sie|laduja sie", t) is not None:
+        fields.add("ladowarki")
+    if find_number_near("oczekuje|oczekuja|oczekujace|oczekujacych", t) is not None:
+        fields.add("oczekujace")
+    return fields
+
+
+def missing_inventory_check_text(user_id):
+    required = {"gotowe", "ladowarki", "oczekujace"}
+    done = get_driver_inventory_check(user_id)
+    missing = required - done
+    if not missing:
+        return None
+    names = {"gotowe": "gotowe", "ladowarki": "ładowarki", "oczekujace": "oczekujące"}
+    missing_txt = ", ".join(names[x] for x in sorted(missing))
+    return (
+        "⚠️ ZŁA KOLEJNOŚĆ\n\n"
+        "Najpierw podaj aktualny stan magazynu, dopiero potem wpisz/kliknij Zabrane.\n\n"
+        f"Brakuje: {missing_txt}\n\n"
+        "Przykład:\n"
+        "gotowe 195\n"
+        "ladowarki 85\n"
+        "oczekuje 0\n"
+        "zabrane 50"
+    )
+
 
 
 def get_driver_name(user):
@@ -522,6 +585,136 @@ def active_trips_text():
     return "🚚 AKTYWNE TRASY\n" + ("\n".join(lines) if lines else "Brak aktywnych tras.")
 
 
+
+def period_start(period):
+    current = now()
+
+    if period in ["tydzien", "week"]:
+        return (current - timedelta(days=current.weekday())).replace(hour=0, minute=0, second=0, microsecond=0), "TYDZIEŃ"
+
+    if period in ["miesiac", "month"]:
+        return current.replace(day=1, hour=0, minute=0, second=0, microsecond=0), "MIESIĄC"
+
+    return current.replace(hour=0, minute=0, second=0, microsecond=0), "DZIŚ"
+
+
+def driver_name_match(saved_name, query):
+    saved = normalize_text(saved_name).strip()
+    q = normalize_text(query).strip()
+
+    if not q:
+        return False
+
+    return q == saved or q in saved or saved in q
+
+
+def driver_report(driver_query, period="dzis"):
+    db = load_db()
+    start_period, title = period_start(period)
+
+    matched_name = None
+    batteries = 0
+    trips = 0
+    earned = 0.0
+    late = 0
+    hours_total = 0.0
+
+    for trip in db["trips"]:
+        if trip.get("end") is None:
+            continue
+
+        driver = trip.get("driver", "")
+        if not driver_name_match(driver, driver_query):
+            continue
+
+        end = datetime.fromisoformat(trip["end"])
+        if end < start_period:
+            continue
+
+        matched_name = driver
+        batteries += int(trip.get("returned", 0))
+        trips += 1
+        earned += float(trip.get("earned", 0))
+        hours_total += float(trip.get("hours", 0))
+
+        if float(trip.get("late_hours", 0)) > 0:
+            late += 1
+
+    if not matched_name:
+        return f"📊 RAPORT {title}\n\nBrak danych dla kierowcy: {driver_query}"
+
+    avg = fmt_hours(hours_total / trips) if trips else "0h 0min"
+
+    return (
+        f"📊 RAPORT {title}\n"
+        f"👤 Kierowca: {matched_name}\n\n"
+        f"Oddane: {batteries} baterii\n"
+        f"Trasy: {trips}\n"
+        f"Średni czas: {avg}\n"
+        f"Spóźnienia: {late}\n"
+        f"Zarobek: £{earned:.2f}"
+    )
+
+
+def weekly_all_drivers_report():
+    db = load_db()
+    start_period, title = period_start("tydzien")
+
+    summary = {}
+    for trip in db["trips"]:
+        if trip.get("end") is None:
+            continue
+
+        end = datetime.fromisoformat(trip["end"])
+        if end < start_period:
+            continue
+
+        name = trip.get("driver", "Nieznany")
+        s = summary.setdefault(name, {"batteries": 0, "trips": 0, "earned": 0.0, "late": 0, "hours": 0.0})
+        s["batteries"] += int(trip.get("returned", 0))
+        s["trips"] += 1
+        s["earned"] += float(trip.get("earned", 0))
+        s["hours"] += float(trip.get("hours", 0))
+
+        if float(trip.get("late_hours", 0)) > 0:
+            s["late"] += 1
+
+    if not summary:
+        return "📊 RAPORT TYGODNIOWY\nBrak danych."
+
+    lines = ["📊 RAPORT TYGODNIOWY", "🕕 Automatyczny raport: poniedziałek 06:00", ""]
+    total_batt = 0
+    total_trips = 0
+    total_earned = 0.0
+
+    for name, s in sorted(summary.items(), key=lambda x: x[1]["batteries"], reverse=True):
+        total_batt += s["batteries"]
+        total_trips += s["trips"]
+        total_earned += s["earned"]
+        avg = fmt_hours(s["hours"] / s["trips"]) if s["trips"] else "0h 0min"
+
+        lines += [
+            f"{name}:",
+            f"Oddane: {s['batteries']} baterii",
+            f"Trasy: {s['trips']}",
+            f"Średni czas: {avg}",
+            f"Spóźnienia: {s['late']}",
+            f"Zarobek: £{s['earned']:.2f}",
+            ""
+        ]
+
+    lines += [
+        "━━━━━━━━━━",
+        "TOTAL FIRMA:",
+        f"Oddane baterie: {total_batt}",
+        f"Trasy: {total_trips}",
+        f"Do wypłaty: £{total_earned:.2f}",
+        "━━━━━━━━━━",
+    ]
+
+    return "\n".join(lines)
+
+
 def report(period="dzis"):
     db = load_db()
     current = now()
@@ -671,8 +864,9 @@ def help_text():
         "📌 KOMENDY / MENU:\n\n"
         "Kliknij przycisk i wpisz samą liczbę.\n\n"
         "🚗 KIEROWCY:\n"
-        "Zabrane → wpisz np. 30\n"
-        "Oddane → wpisz np. 61\n"
+        "Najpierw podaj: Gotowe, Ładowarka, Oczekują.\n"
+        "Dopiero potem Zabrane → wpisz np. 30\n"
+        "Oddane → wpisz np. 61, minimum to 1.\n"
         "Można też pisać ręcznie: 30 zabrane / oddane 61\n\n"
         "👷‍♂️ KIEROWCY — magazyn:\n"
         "Gotowe → liczba\n"
@@ -688,6 +882,10 @@ def help_text():
         "Alert → wpisz treść\n\n"
         "📊 RAPORT / STAN:\n"
         "status / stan / raport dzis / ranking dzis\n"
+        "raport Jan Kowalski\n"
+        "raport dzis Jan Kowalski\n"
+        "raport tydzien Jan Kowalski\n"
+        "Raport tygodniowy firmy idzie automatycznie w poniedziałek o 06:00.\n"
     )
 
 def handle_command(text, user, chat_id):
@@ -777,10 +975,24 @@ def handle_command(text, user, chat_id):
         return "✅ Ta grupa została ustawiona jako grupa główna dla alertów."
 
     if t.startswith("raport"):
+        words = t.split()
         period = "dzis"
+
         for p in ["dzis", "tydzien", "week", "miesiac", "month"]:
-            if p in t.split():
+            if p in words:
                 period = p
+
+        # Raport konkretnego kierowcy:
+        # raport Jan Kowalski
+        # raport dzis Jan Kowalski
+        # raport tydzien Jan Kowalski
+        name_query = text
+        name_query = re.sub(r"(?i)^\s*raport\s*", "", name_query).strip()
+        name_query = re.sub(r"(?i)\b(dzis|dziś|tydzien|tydzień|week|miesiac|miesiąc|month)\b", "", name_query).strip()
+
+        if name_query:
+            return driver_report(name_query, period)
+
         return report(period)
 
     if t.startswith("ranking") or t.startswith("top"):
@@ -815,6 +1027,11 @@ def handle_command(text, user, chat_id):
     if any(word in t for word in driver_inventory_words):
         inventory_reply = set_inventory_command(text)
         if inventory_reply:
+            fields = inventory_fields_in_text(text)
+            if fields:
+                mark_driver_inventory_check(user_id, fields)
+                if {"gotowe", "ladowarki", "oczekujace"}.issubset(get_driver_inventory_check(user_id)):
+                    inventory_reply += "\n\n✅ Stan magazynu podany. Teraz możesz wpisać: zabrane X"
             return inventory_reply
 
     if t in ["status", "stan"]:
@@ -836,6 +1053,21 @@ def handle_command(text, user, chat_id):
     m = re.search(r"(?:w\s+tym|z\s+tego)\s+(\d+)\s+(?:naladowanych|naładowanych|gotowych)", normalize_text(text))
     if m:
         charged_inside = int(m.group(1))
+
+    if returned_qty is not None and returned_qty < 1:
+        return (
+            "🚨 BŁĄD: nie można oddać 0 baterii.\n"
+            "Minimum to 1.\n\n"
+            "Jeśli to korekta, zgłoś ją adminowi."
+        )
+
+    if take_qty is not None and take_qty < 1:
+        return "🚨 BŁĄD: nie można zabrać 0 baterii. Minimum to 1."
+
+    if take_qty is not None:
+        missing_msg = missing_inventory_check_text(user_id)
+        if missing_msg:
+            return missing_msg
 
     if returned_qty is not None:
         trip = active_trip(db, user_id)
@@ -882,6 +1114,7 @@ def handle_command(text, user, chat_id):
                 "alert_sent": False
             })
             take_from_ready(take_qty)
+            reset_driver_inventory_check(user_id)
             responses.append(
                 f"{name} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
@@ -991,9 +1224,35 @@ async def driver_alerts(app: Application):
         await asyncio.sleep(60)
 
 
+
+async def weekly_report_scheduler(app: Application):
+    while True:
+        try:
+            current = now()
+
+            # Poniedziałek 06:00-06:04
+            if current.weekday() == 0 and current.hour == 6 and current.minute < 5:
+                data = load_json(WEEKLY_REPORT_FILE, {"last_sent": None})
+                today_key = current.strftime("%Y-%m-%d")
+
+                if data.get("last_sent") != today_key:
+                    chat_id = load_group().get("chat_id")
+                    if chat_id:
+                        await app.bot.send_message(chat_id=chat_id, text=weekly_all_drivers_report())
+                        data["last_sent"] = today_key
+                        save_json(WEEKLY_REPORT_FILE, data)
+
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            print("weekly_report_scheduler error:", e)
+            await asyncio.sleep(60)
+
+
 async def post_init(app: Application):
     asyncio.create_task(charging_scheduler(app))
     asyncio.create_task(driver_alerts(app))
+    asyncio.create_task(weekly_report_scheduler(app))
 
 
 def main():
@@ -1004,9 +1263,10 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v5.7 działa...")
+    print("Telegram Lime Battery Bot PRO v5.9 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
