@@ -471,6 +471,202 @@ def restore_charging_command(text, chat_id):
 
 
 
+
+def setup_wizard_start(user_id):
+    USER_STATE[str(user_id)] = {
+        "action": "setup_depo",
+        "setup": {
+            "depot": None,
+            "ready": None,
+            "waiting": None,
+            "charging": 0,
+            "charging_start": None,
+            "trips": []
+        }
+    }
+
+    return (
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "1️⃣ Podaj stan DEPO, np.:\n"
+        "494"
+    )
+
+
+def setup_wizard_handle(text, user_id, chat_id):
+    """
+    Kreator po resecie:
+    reset -> depo -> ladowarki + start -> gotowe -> oczekuje -> trasy -> zatwierdz
+    """
+    key = str(user_id)
+    state = USER_STATE.get(key)
+    if not state or not str(state.get("action", "")).startswith("setup_"):
+        return None
+
+    action = state.get("action")
+    setup = state.get("setup", {})
+    raw = text.strip()
+    t = normalize_text(raw)
+
+    def set_state(new_action):
+        state["action"] = new_action
+        state["setup"] = setup
+        USER_STATE[key] = state
+
+    def parse_plain_or_named_number(names=None):
+        if only_number(raw):
+            return int(raw.strip())
+        if names:
+            return find_number_near(names, t)
+        return None
+
+    if t in ["anuluj", "cancel"]:
+        USER_STATE.pop(key, None)
+        return "❌ Kreator anulowany."
+
+    if action == "setup_depo":
+        qty = parse_plain_or_named_number("depo|depot|magazyn|mamy|total")
+        if qty is None:
+            return "Podaj samą liczbę depo, np. 494"
+        setup["depot"] = qty
+        set_state("setup_charging_qty")
+        return (
+            "✅ Depo zapisane.\n\n"
+            "2️⃣ Podaj ile jest W ŁADOWARKACH, np.:\n"
+            "57\n\n"
+            "Jeśli zero, wpisz: 0"
+        )
+
+    if action == "setup_charging_qty":
+        qty = parse_plain_or_named_number("ladowarka|ladowarki|w ladowarkach")
+        if qty is None:
+            return "Podaj samą liczbę baterii w ładowarkach, np. 57"
+        setup["charging"] = qty
+        if qty > 0:
+            set_state("setup_charging_start")
+            return (
+                "✅ Ładowarki zapisane.\n\n"
+                "2b️⃣ Podaj START ładowania, np.:\n"
+                "13:24\n\n"
+                "Możesz też wpisać: teraz"
+            )
+        set_state("setup_ready")
+        return (
+            "✅ Ładowarki: 0.\n\n"
+            "3️⃣ Podaj ile jest GOTOWYCH, np.:\n"
+            "77"
+        )
+
+    if action == "setup_charging_start":
+        if t in ["teraz", "now"]:
+            setup["charging_start"] = fmt_dt(now())
+        else:
+            m = re.search(r"(\d{1,2}[:.]\d{2})", raw)
+            if not m:
+                return "Podaj godzinę startu, np. 13:24 albo wpisz: teraz"
+            setup["charging_start"] = m.group(1).replace(".", ":")
+        set_state("setup_ready")
+        return (
+            "✅ Start ładowania zapisany.\n\n"
+            "3️⃣ Podaj ile jest GOTOWYCH, np.:\n"
+            "77"
+        )
+
+    if action == "setup_ready":
+        qty = parse_plain_or_named_number("gotowe|gotowych")
+        if qty is None:
+            return "Podaj samą liczbę gotowych, np. 77"
+        setup["ready"] = qty
+        set_state("setup_waiting")
+        return (
+            "✅ Gotowe zapisane.\n\n"
+            "4️⃣ Podaj ile jest OCZEKUJĄCYCH, np.:\n"
+            "77"
+        )
+
+    if action == "setup_waiting":
+        qty = parse_plain_or_named_number("oczekuje|oczekuja|oczekujace|oczekujacych")
+        if qty is None:
+            return "Podaj samą liczbę oczekujących, np. 77"
+        setup["waiting"] = qty
+        set_state("setup_trips")
+        return (
+            "✅ Oczekujące zapisane.\n\n"
+            "5️⃣ Teraz podaj kierowców w trasie — po jednej osobie w wiadomości.\n\n"
+            "Format:\n"
+            "trasa Imie Nazwisko 55 start 14:52\n\n"
+            "Przykład:\n"
+            "trasa Marcin 55 start 14:52\n\n"
+            "Gdy wpiszesz wszystkich, napisz:\n"
+            "zatwierdz"
+        )
+
+    if action == "setup_trips":
+        if t in ["zatwierdz", "zatwierdzam", "gotowe", "koniec"]:
+            # Save everything at once
+            save_db({"trips": []})
+            save_jobs({"jobs": []})
+            save_driver_checks({})
+
+            inv = {
+                "depot_total": int(setup.get("depot") or 0),
+                "ready": int(setup.get("ready") or 0),
+                "waiting": int(setup.get("waiting") or 0),
+                "charging": 0,
+                "updated_at": None
+            }
+            save_inventory(inv)
+
+            # Restore charging with timer
+            charging_qty = int(setup.get("charging") or 0)
+            charging_start = setup.get("charging_start")
+            if charging_qty > 0 and charging_start:
+                restore_charging_command(f"ladowarki {charging_qty} start {charging_start}", chat_id)
+
+            # Restore trips
+            for trip in setup.get("trips", []):
+                restore_trip_command(
+                    f"{trip['driver']} zabrane {trip['qty']} start {trip['start']}",
+                    chat_id
+                )
+
+            USER_STATE.pop(key, None)
+            return "✅ ZATWIERDZONE\n\nSystem uzupełniony i gotowy do pracy.\n\n" + status_report()
+
+        # Accept driver route line
+        m = re.search(
+            r"^(?:trasa\s+)?(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+            raw,
+            re.IGNORECASE
+        )
+        if not m:
+            return (
+                "Nie rozumiem trasy.\n\n"
+                "Wpisz np.:\n"
+                "trasa Marcin 55 start 14:52\n\n"
+                "Albo zakończ:\n"
+                "zatwierdz"
+            )
+
+        driver = m.group(1).strip()
+        qty = int(m.group(2))
+        start = m.group(3).replace(".", ":")
+
+        if qty < 1:
+            return "🚨 Trasa musi mieć minimum 1 baterię."
+
+        setup.setdefault("trips", []).append({"driver": driver, "qty": qty, "start": start})
+        set_state("setup_trips")
+
+        return (
+            f"✅ Dodano trasę: {driver} — {qty} baterii, start {start}\n\n"
+            "Podaj następnego kierowcę albo wpisz:\n"
+            "zatwierdz"
+        )
+
+    return None
+
+
 def reset_all_command(text):
     """
     Komenda admina:
@@ -1113,10 +1309,10 @@ def help_text():
         "aktualizacja depo 505 gotowe 197 oczekuje 114 ladowarki 133\n"
         "aktualizacja reset depo 505 gotowe 197 oczekuje 114 ladowarki 133\n"
         "aktualizacja trasa Waldek 60\n"
-        "reset\n"
-        "depo 494 / gotowe 77 / oczekuje 77\n"
-        "ladowarki 57 start 13:24\n"
-        "Marcin zabrane 55 start 14:52\n\n"
+        "reset — uruchamia kreator uzupełniania danych\n"
+        "W kreatorze wpisujesz depo, ładowarki, gotowe, oczekujące i trasy.\n"
+        "Format trasy: trasa Marcin 55 start 14:52\n"
+        "Na końcu wpisz: zatwierdz\n\n"
         "👑 ADMIN — komunikaty:\n"
         "Ogłoszenie → wpisz treść\n"
         "Alert → wpisz treść\n\n"
@@ -1135,6 +1331,38 @@ def handle_command(text, user, chat_id):
     user_id = str(user.id)
     responses = []
 
+    # WAŻNE: komendy admina i pełne komendy z "start" mają pierwszeństwo
+    # nawet jeśli wcześniej kliknięto przycisk Ładowarka/Gotowe/Oczekują.
+    if is_admin(user):
+        admin_reset_reply = reset_all_command(text)
+        if admin_reset_reply:
+            USER_STATE.pop(user_id, None)
+            return setup_wizard_start(user_id)
+
+        admin_restore_charge_reply = restore_charging_command(text, chat_id)
+        if admin_restore_charge_reply:
+            USER_STATE.pop(user_id, None)
+            return admin_restore_charge_reply
+
+        admin_restore_trip_reply = restore_trip_command(text, chat_id)
+        if admin_restore_trip_reply:
+            USER_STATE.pop(user_id, None)
+            return admin_restore_trip_reply
+
+        if "start" in t:
+            return (
+                "❌ Nie rozumiem tej komendy ze startem.\n\n"
+                "Użyj np.:\n"
+                "ladowarki 45 start 13:15\n"
+                "Marcin zabrane 55 start 14:52"
+            )
+
+    setup_reply = setup_wizard_handle(text, user_id, chat_id)
+    if setup_reply:
+        if not is_admin(user):
+            return "❌ Kreator resetu jest tylko dla administratora."
+        return setup_reply
+
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
         state = USER_STATE.pop(user_id)
@@ -1143,7 +1371,11 @@ def handle_command(text, user, chat_id):
         if action in ["zabrane", "oddane", "gotowe", "ladowarka", "oczekuja", "depo"]:
             if not only_number(text):
                 USER_STATE[user_id] = state
-                return "Wpisz samą liczbę, np. 30"
+                return (
+                    "Wpisz samą liczbę, np. 30\n\n"
+                    "Jeśli chcesz komendę z czasem, najpierw anuluj przycisk komendą: reset\n"
+                    "albo wpisz pełną komendę jako admin, np. ladowarki 45 start 13:15"
+                )
             qty = int(text.strip())
             return handle_command(f"{action} {qty}", user, chat_id)
 
@@ -1527,11 +1759,12 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v6.1 działa...")
+    print("Telegram Lime Battery Bot PRO v6.3 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
