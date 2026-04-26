@@ -295,8 +295,23 @@ def status_report():
     if transit_details:
         lines.append("")
         lines.append("Kierowcy w trasie:")
-        for driver, qty in sorted(transit_details.items()):
-            lines.append(f"• {driver}: {qty} baterii")
+        db = load_db()
+        current = now()
+        active_info = []
+        for trip in db["trips"]:
+            if trip.get("end") is None:
+                start = datetime.fromisoformat(trip["start"])
+                deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+                left_minutes = int((deadline - current).total_seconds() // 60)
+                if left_minutes >= 0:
+                    left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
+                else:
+                    late = abs(left_minutes)
+                    left_txt = f"spóźnienie {late // 60}h {late % 60}min"
+                active_info.append((trip.get("driver", "Nieznany"), int(trip.get("qty", 0)), left_txt))
+
+        for driver, qty, left_txt in sorted(active_info):
+            lines.append(f"• {driver}: {qty} baterii ({left_txt})")
 
     lines += [
         "",
@@ -317,6 +332,211 @@ def status_report():
     return "\n".join(lines)
 
 
+
+
+
+def parse_time_today(time_text):
+    cleaned = time_text.replace(".", ":")
+    hour, minute = cleaned.split(":")
+    return now().replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+
+
+def restore_trip_command(text, chat_id):
+    """
+    Po resecie ręcznie odtwarza aktywną trasę:
+    Marcin zabrane 55 start 14:52
+    Karol trasa 40 start 13.27
+
+    Nie odejmuje z gotowych — to jest odtworzenie stanu.
+    """
+    raw = text.strip()
+
+    match = re.search(
+        r"^(.+?)\s+(?:zabrane|trasa|w trasie)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+        raw,
+        re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    driver = match.group(1).strip()
+    qty = int(match.group(2))
+    start_time = parse_time_today(match.group(3))
+
+    if qty < 1:
+        return "🚨 BŁĄD: trasa musi mieć minimum 1 baterię."
+
+    db = load_db()
+    wanted = normalize_text(driver)
+
+    db["trips"] = [
+        trip for trip in db["trips"]
+        if not (
+            trip.get("end") is None
+            and (
+                normalize_text(trip.get("driver", "")) == wanted
+                or wanted in normalize_text(trip.get("driver", ""))
+                or normalize_text(trip.get("driver", "")) in wanted
+            )
+        )
+    ]
+
+    db["trips"].append({
+        "driver": driver,
+        "user_id": f"manual:{wanted}",
+        "chat_id": chat_id,
+        "start": start_time.isoformat(),
+        "qty": qty,
+        "end": None,
+        "alert_sent": False,
+        "manual": True,
+        "restored": True
+    })
+
+    save_db(db)
+
+    deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+
+    return (
+        f"✅ ODTWORZONO TRASĘ\n\n"
+        f"🚗 {driver}: {qty} baterii\n"
+        f"Start: {fmt_dt(start_time)}\n"
+        f"Deadline: {fmt_dt(deadline)}\n"
+        f"📌 Gotowe NIE zostały pomniejszone.\n\n"
+        f"{status_report()}"
+    )
+
+
+def restore_charging_command(text, chat_id):
+    """
+    Po resecie odtwarza aktywne ładowanie:
+    ladowarki 57 start 13:24
+    ladowanie 57 start 13.24
+
+    Dodaje job ładowania i dodaje stan w ładowarkach.
+    """
+    raw = text.strip()
+    t = normalize_text(raw)
+
+    match = re.search(
+        r"^(?:ladowarki|ladowarka|ladowanie|wlozone)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+        t,
+        re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    qty = int(match.group(1))
+    start_time = parse_time_today(match.group(2))
+
+    if qty < 1:
+        return "🚨 BŁĄD: ładowarki muszą mieć minimum 1 baterię."
+
+    ready_time = start_time + timedelta(hours=CHARGE_TIME_HOURS)
+    alarm_time = ready_time - timedelta(minutes=ALARM_BEFORE_MINUTES)
+
+    data = load_jobs()
+    jobs = data.setdefault("jobs", [])
+    job_id = len(jobs) + 1
+
+    jobs.append({
+        "id": job_id,
+        "qty": qty,
+        "chat_id": chat_id,
+        "start_at": start_time.isoformat(),
+        "ready_at": ready_time.isoformat(),
+        "alarm_at": alarm_time.isoformat(),
+        "alarm_sent": now() >= alarm_time,
+        "ready_sent": False,
+        "status": "alarm_sent" if now() >= alarm_time else "charging",
+        "manual": True,
+        "restored": True
+    })
+    save_jobs(data)
+
+    inv = load_inventory()
+    inv["charging"] = int(inv.get("charging", 0)) + qty
+    save_inventory(inv)
+
+    return (
+        f"✅ ODTWORZONO ŁADOWANIE\n\n"
+        f"🔌 W ładowarkach: {qty}\n"
+        f"Start: {fmt_dt(start_time)}\n"
+        f"Gotowe: {fmt_dt(ready_time)}\n"
+        f"Alarm: {fmt_dt(alarm_time)}\n\n"
+        f"{status_report()}"
+    )
+
+
+
+def reset_all_command(text):
+    """
+    Komenda admina:
+    reset
+
+    Czyści wszystko:
+    - trasy
+    - magazyn
+    - ładowania
+    - checki kierowców
+    """
+    t = normalize_text(text).strip()
+
+    if t not in ["reset", "reset wszystko", "reset system"]:
+        return None
+
+    save_db({"trips": []})
+    save_inventory({
+        "depot_total": 0,
+        "ready": 0,
+        "waiting": 0,
+        "charging": 0,
+        "updated_at": None
+    })
+    save_jobs({"jobs": []})
+    save_driver_checks({})
+
+    return (
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Wyczyszczono:\n"
+        "🚗 trasy\n"
+        "📦 magazyn\n"
+        "🔌 ładowania\n\n"
+        "Teraz wpisz stany i kierowców od nowa, np.:\n"
+        "depo 494\n"
+        "gotowe 77\n"
+        "oczekuje 77\n"
+        "ladowarki 57 start 13:24\n"
+        "Marcin zabrane 55 start 14:52"
+    )
+
+
+def restore_inventory_with_start_command(text, chat_id):
+    """
+    Odtwarza po resecie:
+    depo 494
+    gotowe 77
+    oczekuje 77
+    ladowarki 57 start 13:24
+
+    Dla gotowe/oczekuje/depo bez startu tylko ustawia stan.
+    Dla ladowarki ze startem dodaje aktywne ładowanie z czasem.
+    """
+    t = normalize_text(text)
+
+    if "start" in t:
+        charge_reply = restore_charging_command(text, chat_id)
+        if charge_reply:
+            return charge_reply
+        return None
+
+    normal_state = set_inventory_command(text)
+    if normal_state:
+        return normal_state
+
+    return None
 
 
 def update_route_command(text, chat_id):
@@ -576,12 +796,28 @@ def calc_trip(start_iso, qty):
 def active_trips_text():
     db = load_db()
     lines = []
+    current = now()
+
     for trip in db["trips"]:
         if trip.get("end") is None:
             start = datetime.fromisoformat(trip["start"])
-            hours = (now() - start).total_seconds() / 3600
-            state = "OK ✅" if hours <= TIME_LIMIT_HOURS else "SPÓŹNIONY ❌"
-            lines.append(f"{trip['driver']}: {trip['qty']} baterii, czas {fmt_hours(hours)}, {state}")
+            deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+            hours = (current - start).total_seconds() / 3600
+            left_minutes = int((deadline - current).total_seconds() // 60)
+
+            if left_minutes >= 0:
+                left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
+                state = "OK ✅"
+            else:
+                late = abs(left_minutes)
+                left_txt = f"spóźnienie {late // 60}h {late % 60}min"
+                state = "SPÓŹNIONY ❌"
+
+            lines.append(
+                f"{trip['driver']}: {trip['qty']} baterii, "
+                f"start {fmt_dt(start)}, deadline {fmt_dt(deadline)}, {left_txt}, {state}"
+            )
+
     return "🚚 AKTYWNE TRASY\n" + ("\n".join(lines) if lines else "Brak aktywnych tras.")
 
 
@@ -876,7 +1112,11 @@ def help_text():
         "Depo → liczba\n"
         "aktualizacja depo 505 gotowe 197 oczekuje 114 ladowarki 133\n"
         "aktualizacja reset depo 505 gotowe 197 oczekuje 114 ladowarki 133\n"
-        "aktualizacja trasa Waldek 60\n\n"
+        "aktualizacja trasa Waldek 60\n"
+        "reset\n"
+        "depo 494 / gotowe 77 / oczekuje 77\n"
+        "ladowarki 57 start 13:24\n"
+        "Marcin zabrane 55 start 14:52\n\n"
         "👑 ADMIN — komunikaty:\n"
         "Ogłoszenie → wpisz treść\n"
         "Alert → wpisz treść\n\n"
@@ -942,6 +1182,30 @@ def handle_command(text, user, chat_id):
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
+
+    reset_reply = reset_all_command(text)
+    if reset_reply:
+        if not is_admin(user):
+            return "❌ Reset jest tylko dla administratora."
+        return reset_reply
+
+    restore_inventory_reply = restore_inventory_with_start_command(text, chat_id)
+    if restore_inventory_reply:
+        if not is_admin(user):
+            return "❌ Odtwarzanie stanu jest tylko dla administratora."
+        return restore_inventory_reply
+
+    restore_trip_reply = restore_trip_command(text, chat_id)
+    if restore_trip_reply:
+        if not is_admin(user):
+            return "❌ Odtwarzanie trasy jest tylko dla administratora."
+        return restore_trip_reply
+
+    restore_charging_reply = restore_charging_command(text, chat_id)
+    if restore_charging_reply:
+        if not is_admin(user):
+            return "❌ Odtwarzanie ładowania jest tylko dla administratora."
+        return restore_charging_reply
 
     route_reply = update_route_command(text, chat_id)
     if route_reply:
@@ -1263,10 +1527,11 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v5.9 działa...")
+    print("Telegram Lime Battery Bot PRO v6.1 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
