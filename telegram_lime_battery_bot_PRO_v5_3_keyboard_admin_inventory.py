@@ -351,8 +351,12 @@ def restore_trip_command(text, chat_id):
     """
     raw = text.strip()
 
+    # Obsługiwane formaty:
+    # trasa Adam 100 start 07:39
+    # Adam zabrane 100 start 07:39
+    # Adam 100 start 07:39
     match = re.search(
-        r"^(.+?)\s+(?:zabrane|trasa|w trasie)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+        r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
         raw,
         re.IGNORECASE
     )
@@ -593,10 +597,12 @@ def setup_wizard_handle(text, user_id, chat_id):
         return (
             "✅ Oczekujące zapisane.\n\n"
             "5️⃣ Teraz podaj kierowców w trasie — po jednej osobie w wiadomości.\n\n"
-            "Format:\n"
-            "trasa Imie Nazwisko 55 start 14:52\n\n"
+            "Formaty, które działają:\n"
+            "trasa Imie Nazwisko 55 start 14:52\n"
+            "Imie Nazwisko zabrane 55 start 14:52\n"
+            "Imie Nazwisko 55 start 14:52\n\n"
             "Przykład:\n"
-            "trasa Marcin 55 start 14:52\n\n"
+            "trasa Adam 100 start 07:39\n\n"
             "Gdy wpiszesz wszystkich, napisz:\n"
             "zatwierdz"
         )
@@ -633,9 +639,12 @@ def setup_wizard_handle(text, user_id, chat_id):
             USER_STATE.pop(key, None)
             return "✅ ZATWIERDZONE\n\nSystem uzupełniony i gotowy do pracy.\n\n" + status_report()
 
-        # Accept driver route line
+        # Accept driver route line:
+        # trasa Adam 100 start 07:39
+        # Adam zabrane 100 start 07:39
+        # Adam 100 start 07:39
         m = re.search(
-            r"^(?:trasa\s+)?(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+            r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
             raw,
             re.IGNORECASE
         )
@@ -643,7 +652,8 @@ def setup_wizard_handle(text, user_id, chat_id):
             return (
                 "Nie rozumiem trasy.\n\n"
                 "Wpisz np.:\n"
-                "trasa Marcin 55 start 14:52\n\n"
+                "trasa Adam 100 start 07:39\n"
+                "Adam zabrane 100 start 07:39\n\n"
                 "Albo zakończ:\n"
                 "zatwierdz"
             )
@@ -1331,14 +1341,22 @@ def handle_command(text, user, chat_id):
     user_id = str(user.id)
     responses = []
 
-    # WAŻNE: komendy admina i pełne komendy z "start" mają pierwszeństwo
-    # nawet jeśli wcześniej kliknięto przycisk Ładowarka/Gotowe/Oczekują.
+    # RESET admina zawsze zaczyna kreator od nowa.
     if is_admin(user):
         admin_reset_reply = reset_all_command(text)
         if admin_reset_reply:
             USER_STATE.pop(user_id, None)
             return setup_wizard_start(user_id)
 
+    # Jeśli kreator po resecie jest aktywny, ma pierwszeństwo.
+    setup_reply = setup_wizard_handle(text, user_id, chat_id)
+    if setup_reply:
+        if not is_admin(user):
+            return "❌ Kreator resetu jest tylko dla administratora."
+        return setup_reply
+
+    # Pełne komendy admina z czasem działają poza kreatorem.
+    if is_admin(user):
         admin_restore_charge_reply = restore_charging_command(text, chat_id)
         if admin_restore_charge_reply:
             USER_STATE.pop(user_id, None)
@@ -1354,14 +1372,9 @@ def handle_command(text, user, chat_id):
                 "❌ Nie rozumiem tej komendy ze startem.\n\n"
                 "Użyj np.:\n"
                 "ladowarki 45 start 13:15\n"
-                "Marcin zabrane 55 start 14:52"
+                "trasa Adam 100 start 07:39\n"
+                "Adam zabrane 100 start 07:39"
             )
-
-    setup_reply = setup_wizard_handle(text, user_id, chat_id)
-    if setup_reply:
-        if not is_admin(user):
-            return "❌ Kreator resetu jest tylko dla administratora."
-        return setup_reply
 
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
@@ -1759,12 +1772,13 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v6.3 działa...")
+    print("Telegram Lime Battery Bot PRO v6.4 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
