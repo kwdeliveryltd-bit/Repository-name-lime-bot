@@ -15,6 +15,7 @@ INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
 GROUP_FILE = "telegram_group.json"
 DRIVER_CHECK_FILE = "telegram_driver_checks.json"
+DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
@@ -677,6 +678,359 @@ def setup_wizard_handle(text, user_id, chat_id):
     return None
 
 
+
+def load_driver_flow():
+    return load_json(DRIVER_FLOW_FILE, {})
+
+
+def save_driver_flow(data):
+    save_json(DRIVER_FLOW_FILE, data)
+
+
+def clear_driver_flow(user_id):
+    data = load_driver_flow()
+    key = str(user_id)
+    if key in data:
+        del data[key]
+        save_driver_flow(data)
+
+
+def start_pickup_flow(user, chat_id, pending_qty=None):
+    """
+    Kierowca chce zabrać baterie, ale najpierw musi sprawdzić stany:
+    gotowe, ladowarki, oczekuje, a dopiero potem ilość zabranych.
+    """
+    data = load_driver_flow()
+    data[str(user.id)] = {
+        "type": "pickup",
+        "chat_id": chat_id,
+        "step": "ready",
+        "driver": get_driver_name(user),
+        "created_at": now().isoformat(),
+        "ready": None,
+        "charging": None,
+        "waiting": None,
+        "qty": pending_qty
+    }
+    save_driver_flow(data)
+
+    return (
+        "🚗 KONTROLA PRZED ZABRANIEM\n\n"
+        "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
+        + (f"\nZapamiętałem, że chcesz zabrać: {pending_qty}." if pending_qty else "")
+        + "\n\n1/4 Podaj ilość GOTOWYCH baterii:"
+    )
+
+
+def start_return_flow(user, chat_id, returned_qty):
+    """
+    Kierowca oddaje baterie i musi rozdzielić je na:
+    - gotowe
+    - do ładowarek
+    - oczekujące
+    """
+    returned_qty = int(returned_qty)
+
+    data = load_driver_flow()
+    data[str(user.id)] = {
+        "type": "return",
+        "chat_id": chat_id,
+        "step": "ready_return",
+        "driver": get_driver_name(user),
+        "created_at": now().isoformat(),
+        "returned": returned_qty,
+        "ready_return": None,
+        "to_charging": None,
+        "to_waiting": None
+    }
+    save_driver_flow(data)
+
+    return (
+        f"🔁 KONTROLA ODDANIA\n\n"
+        f"Oddane razem: {returned_qty}\n\n"
+        "1/3 Ile z tych baterii jest GOTOWYCH / naładowanych?\n"
+        "Jeśli żadna, wpisz 0."
+    )
+
+
+def number_from_text(text):
+    match = re.search(r"\d+", text or "")
+    return int(match.group(0)) if match else None
+
+
+def handle_driver_flow(text, user, chat_id):
+    """
+    Obsługa krok po kroku dla kierowcy.
+    To ma pierwszeństwo przed normalnymi komendami, ale admin może przerwać resetem.
+    """
+    data = load_driver_flow()
+    key = str(user.id)
+    flow = data.get(key)
+
+    if not flow:
+        return None
+
+    t = normalize_text(text).strip()
+
+    if t in ["anuluj", "cancel", "stop"]:
+        clear_driver_flow(user.id)
+        return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
+
+    qty = number_from_text(text)
+    if qty is None:
+        return "Wpisz liczbę albo wpisz: anuluj"
+
+    if qty < 0:
+        return "Liczba nie może być ujemna."
+
+    # FLOW: pobranie baterii
+    if flow.get("type") == "pickup":
+        inv = load_inventory()
+
+        if flow["step"] == "ready":
+            flow["ready"] = qty
+            flow["step"] = "charging"
+            inv["ready"] = qty
+            save_inventory(inv)
+            data[key] = flow
+            save_driver_flow(data)
+            return "2/4 Podaj ilość baterii W ŁADOWARKACH:"
+
+        if flow["step"] == "charging":
+            flow["charging"] = qty
+            flow["step"] = "waiting"
+            inv["charging"] = qty
+            save_inventory(inv)
+            data[key] = flow
+            save_driver_flow(data)
+            return "3/4 Podaj ilość baterii OCZEKUJĄCYCH:"
+
+        if flow["step"] == "waiting":
+            flow["waiting"] = qty
+            inv["waiting"] = qty
+            save_inventory(inv)
+
+            if flow.get("qty"):
+                flow["step"] = "confirm_take"
+                data[key] = flow
+                save_driver_flow(data)
+                return (
+                    "✅ Stany zapisane.\n\n"
+                    f"Gotowe: {flow['ready']}\n"
+                    f"W ładowarkach: {flow['charging']}\n"
+                    f"Oczekujące: {flow['waiting']}\n"
+                    f"Zabrane: {flow['qty']}\n\n"
+                    "Wpisz: zatwierdz\n"
+                    "albo: anuluj"
+                )
+
+            flow["step"] = "take_qty"
+            data[key] = flow
+            save_driver_flow(data)
+            return (
+                "✅ Stany zapisane.\n\n"
+                f"Gotowe: {flow['ready']}\n"
+                f"W ładowarkach: {flow['charging']}\n"
+                f"Oczekujące: {flow['waiting']}\n\n"
+                "4/4 Ile baterii ZABIERASZ?"
+            )
+
+        if flow["step"] == "confirm_take":
+            if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
+                return "Wpisz: zatwierdz albo anuluj"
+            qty = int(flow.get("qty", 0))
+
+            if qty < 1:
+                return "🚨 Nie można zabrać 0. Minimum to 1."
+
+            inv = load_inventory()
+            ready = int(inv.get("ready", 0))
+            if qty > ready:
+                return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {qty}"
+
+            db = load_db()
+            existing = active_trip(db, user.id)
+            if existing:
+                clear_driver_flow(user.id)
+                return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: oddane X"
+
+            start_time = now()
+            deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+
+            db["trips"].append({
+                "driver": get_driver_name(user),
+                "user_id": str(user.id),
+                "chat_id": chat_id,
+                "start": start_time.isoformat(),
+                "qty": qty,
+                "end": None,
+                "alert_sent": False
+            })
+            save_db(db)
+
+            inv["ready"] = ready - qty
+            save_inventory(inv)
+            clear_driver_flow(user.id)
+
+            return (
+                f"{get_driver_name(user)} ✅\n"
+                f"Start: {start_time.strftime('%H:%M')}\n"
+                f"Pobrane: {qty}\n"
+                f"Limit: {TIME_LIMIT_HOURS}h\n"
+                f"Deadline: {deadline.strftime('%H:%M')}\n\n"
+                f"{status_report()}"
+            )
+
+        if flow["step"] == "take_qty":
+            if qty < 1:
+                return "🚨 Nie można zabrać 0. Minimum to 1."
+
+            inv = load_inventory()
+            ready = int(inv.get("ready", 0))
+            if qty > ready:
+                return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {qty}"
+
+            db = load_db()
+            existing = active_trip(db, user.id)
+            if existing:
+                clear_driver_flow(user.id)
+                return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: oddane X"
+
+            start_time = now()
+            deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+
+            db["trips"].append({
+                "driver": get_driver_name(user),
+                "user_id": str(user.id),
+                "chat_id": chat_id,
+                "start": start_time.isoformat(),
+                "qty": qty,
+                "end": None,
+                "alert_sent": False
+            })
+            save_db(db)
+
+            inv["ready"] = ready - qty
+            save_inventory(inv)
+            clear_driver_flow(user.id)
+
+            return (
+                f"{get_driver_name(user)} ✅\n"
+                f"Start: {start_time.strftime('%H:%M')}\n"
+                f"Pobrane: {qty}\n"
+                f"Limit: {TIME_LIMIT_HOURS}h\n"
+                f"Deadline: {deadline.strftime('%H:%M')}\n\n"
+                f"{status_report()}"
+            )
+
+    # FLOW: oddanie baterii
+    if flow.get("type") == "return":
+        returned = int(flow.get("returned", 0))
+
+        if flow["step"] == "ready_return":
+            if qty > returned:
+                return f"❌ Gotowych nie może być więcej niż oddanych ({returned})."
+            flow["ready_return"] = qty
+            flow["step"] = "to_charging"
+            data[key] = flow
+            save_driver_flow(data)
+            left = returned - qty
+            return (
+                f"Zostało do rozdzielenia: {left}\n\n"
+                "2/3 Ile idzie OD RAZU DO ŁADOWAREK?\n"
+                "Jeśli nie ma miejsc / żadna, wpisz 0."
+            )
+
+        if flow["step"] == "to_charging":
+            ready_return = int(flow.get("ready_return", 0))
+            left = returned - ready_return
+            if qty > left:
+                return f"❌ Do ładowarek nie może iść więcej niż zostało ({left})."
+            flow["to_charging"] = qty
+            flow["to_waiting"] = left - qty
+            flow["step"] = "confirm_return"
+            data[key] = flow
+            save_driver_flow(data)
+            return (
+                "✅ Podsumowanie oddania:\n\n"
+                f"Oddane razem: {returned}\n"
+                f"Gotowe: {flow['ready_return']}\n"
+                f"Do ładowarek: {flow['to_charging']}\n"
+                f"Oczekujące: {flow['to_waiting']}\n\n"
+                "Wpisz: zatwierdz\n"
+                "albo: anuluj"
+            )
+
+        if flow["step"] == "confirm_return":
+            if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
+                return "Wpisz: zatwierdz albo anuluj"
+
+            db = load_db()
+            trip = active_trip(db, user.id)
+
+            if not trip:
+                clear_driver_flow(user.id)
+                return "Brak aktywnej trasy do zamknięcia."
+
+            if returned > int(trip["qty"]):
+                clear_driver_flow(user.id)
+                return f"❌ Błąd: oddajesz więcej ({returned}) niż masz w trasie ({trip['qty']})."
+
+            end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
+            trip["end"] = end_time.isoformat()
+            trip["returned"] = returned
+            trip["charged_inside"] = int(flow.get("ready_return", 0))
+            trip["hours"] = hours
+            trip["late_hours"] = late_hours
+            trip["rate"] = rate
+            trip["earned"] = earned
+            save_db(db)
+
+            inv = load_inventory()
+            inv["ready"] = int(inv.get("ready", 0)) + int(flow.get("ready_return", 0))
+            inv["charging"] = int(inv.get("charging", 0)) + int(flow.get("to_charging", 0))
+            inv["waiting"] = int(inv.get("waiting", 0)) + int(flow.get("to_waiting", 0))
+            save_inventory(inv)
+
+            # Jeśli coś idzie od razu do ładowarek, tworzymy job od teraz.
+            to_charging = int(flow.get("to_charging", 0))
+            if to_charging > 0:
+                start = now()
+                ready_at = start + timedelta(hours=CHARGE_TIME_HOURS)
+                alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
+                jobs_data = load_jobs()
+                jobs = jobs_data.setdefault("jobs", [])
+                jobs.append({
+                    "id": len(jobs) + 1,
+                    "qty": to_charging,
+                    "chat_id": chat_id,
+                    "start_at": start.isoformat(),
+                    "ready_at": ready_at.isoformat(),
+                    "alarm_at": alarm_at.isoformat(),
+                    "alarm_sent": False,
+                    "ready_sent": False,
+                    "status": "charging"
+                })
+                save_jobs(jobs_data)
+
+            clear_driver_flow(user.id)
+            state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
+
+            return (
+                f"{get_driver_name(user)} zamknął/zamknęła trasę:\n"
+                f"Oddane: {returned}\n"
+                f"Gotowe: {flow.get('ready_return', 0)}\n"
+                f"Do ładowarek: {flow.get('to_charging', 0)}\n"
+                f"Oczekujące: {flow.get('to_waiting', 0)}\n"
+                f"Czas: {fmt_hours(hours)}\n"
+                f"Status: {state}\n"
+                f"Zarobek: £{earned:.2f}\n\n"
+                f"{status_report()}"
+            )
+
+    return None
+
+
 def reset_all_command(text):
     """
     Komenda admina:
@@ -1283,6 +1637,66 @@ def add_charging_job(text, chat_id):
     )
 
 
+
+def clock_report():
+    """
+    Zegarek: pokazuje odliczanie dla kierowców i ładowarek.
+    """
+    current = now()
+    lines = ["⏱️ ZEGAREK", ""]
+
+    db = load_db()
+    active = [trip for trip in db.get("trips", []) if trip.get("end") is None]
+
+    lines.append("🚗 KIEROWCY:")
+    if not active:
+        lines.append("Brak aktywnych tras.")
+    else:
+        for trip in active:
+            start = datetime.fromisoformat(trip["start"])
+            deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+            left_minutes = int((deadline - current).total_seconds() // 60)
+
+            if left_minutes >= 0:
+                left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
+                state = "OK ✅"
+            else:
+                late = abs(left_minutes)
+                left_txt = f"po czasie {late // 60}h {late % 60}min"
+                state = "KONIEC CZASU ❌"
+
+            lines.append(
+                f"• {trip.get('driver', 'Nieznany')}: {trip.get('qty', 0)} baterii | "
+                f"start {fmt_dt(start)} | deadline {fmt_dt(deadline)} | {left_txt} | {state}"
+            )
+
+    lines.append("")
+    lines.append("🔋 ŁADOWARKI:")
+
+    jobs_data = load_jobs()
+    jobs = [j for j in jobs_data.get("jobs", []) if j.get("status") in ["charging", "alarm_sent"]]
+
+    if not jobs:
+        lines.append("Brak aktywnych ładowań.")
+    else:
+        for job in jobs:
+            ready_at = datetime.fromisoformat(job["ready_at"])
+            left_minutes = int((ready_at - current).total_seconds() // 60)
+
+            if left_minutes >= 0:
+                left_txt = f"gotowe za {left_minutes // 60}h {left_minutes % 60}min"
+            else:
+                late = abs(left_minutes)
+                left_txt = f"powinny być gotowe od {late // 60}h {late % 60}min"
+
+            lines.append(
+                f"• ID {job.get('id')}: {job.get('qty', 0)} baterii | "
+                f"gotowe {fmt_dt(ready_at)} | {left_txt}"
+            )
+
+    return "\n".join(lines)
+
+
 def charging_status():
     data = load_jobs()
     jobs = [j for j in data.get("jobs", []) if j.get("status") in ["charging", "alarm_sent"]]
@@ -1327,7 +1741,7 @@ def help_text():
         "Ogłoszenie → wpisz treść\n"
         "Alert → wpisz treść\n\n"
         "📊 RAPORT / STAN:\n"
-        "status / stan / raport dzis / ranking dzis\n"
+        "status / stan / zegarek / raport dzis / ranking dzis\n"
         "raport Jan Kowalski\n"
         "raport dzis Jan Kowalski\n"
         "raport tydzien Jan Kowalski\n"
@@ -1376,18 +1790,32 @@ def handle_command(text, user, chat_id):
                 "Adam zabrane 100 start 07:39"
             )
 
+    flow_reply = handle_driver_flow(text, user, chat_id)
+    if flow_reply:
+        return flow_reply
+
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
         state = USER_STATE.pop(user_id)
         action = state.get("action")
 
-        if action in ["zabrane", "oddane", "gotowe", "ladowarka", "oczekuja", "depo"]:
+        if action == "oddane_start":
+            if not only_number(text):
+                USER_STATE[user_id] = state
+                return "Wpisz samą liczbę oddanych baterii, np. 45"
+            qty = int(text.strip())
+            if qty < 1:
+                USER_STATE[user_id] = state
+                return "🚨 Nie można oddać 0. Minimum to 1."
+            USER_STATE.pop(user_id, None)
+            return start_return_flow(user, chat_id, qty)
+
+        if action in ["gotowe", "ladowarka", "oczekuja", "depo"]:
             if not only_number(text):
                 USER_STATE[user_id] = state
                 return (
                     "Wpisz samą liczbę, np. 30\n\n"
-                    "Jeśli chcesz komendę z czasem, najpierw anuluj przycisk komendą: reset\n"
-                    "albo wpisz pełną komendę jako admin, np. ladowarki 45 start 13:15"
+                    "Jeśli chcesz komendę z czasem, wpisz pełną komendę, np. ladowarki 45 start 13:15"
                 )
             qty = int(text.strip())
             return handle_command(f"{action} {qty}", user, chat_id)
@@ -1407,10 +1835,17 @@ def handle_command(text, user, chat_id):
     if button_action:
         if button_action in ["depo"] and not is_admin(user):
             return "❌ Depo jest tylko dla administratora."
+
+        if button_action == "zabrane":
+            USER_STATE.pop(user_id, None)
+            return start_pickup_flow(user, chat_id)
+
+        if button_action == "oddane":
+            USER_STATE[user_id] = {"action": "oddane_start"}
+            return "Ile baterii oddajesz? Minimum 1."
+
         USER_STATE[user_id] = {"action": button_action}
         labels = {
-            "zabrane": "Ile baterii zabrane?",
-            "oddane": "Ile baterii oddane?",
             "gotowe": "Podaj aktualną liczbę GOTOWYCH baterii:",
             "ladowarka": "Podaj aktualną liczbę baterii W ŁADOWARKACH:",
             "oczekuja": "Podaj aktualną liczbę OCZEKUJĄCYCH baterii:",
@@ -1546,6 +1981,9 @@ def handle_command(text, user, chat_id):
     if t in ["status", "stan"]:
         return status_report()
 
+    if t in ["zegarek", "czas", "odliczanie"]:
+        return clock_report()
+
     if t.startswith("trasy") or t.startswith("aktywni"):
         return active_trips_text()
 
@@ -1576,7 +2014,10 @@ def handle_command(text, user, chat_id):
     if take_qty is not None:
         missing_msg = missing_inventory_check_text(user_id)
         if missing_msg:
-            return missing_msg
+            return start_pickup_flow(user, chat_id, pending_qty=take_qty)
+
+    if returned_qty is not None:
+        return start_return_flow(user, chat_id, returned_qty)
 
     if returned_qty is not None:
         trip = active_trip(db, user_id)
@@ -1677,7 +2118,12 @@ async def charging_scheduler(app: Application):
                 if not job.get("alarm_sent") and current >= alarm_at:
                     await app.bot.send_message(
                         chat_id=chat_id,
-                        text=f"🚨 Baterie będą gotowe za {ALARM_BEFORE_MINUTES} minut!\n🔋 Ilość: {qty}"
+                        text=(
+                            f"⏰ ZEGAREK ŁADOWANIA\n"
+                            f"🔋 Baterie będą gotowe za {ALARM_BEFORE_MINUTES} minut!\n"
+                            f"Ilość: {qty}\n"
+                            f"Gotowe o: {fmt_dt(ready_at)}"
+                        )
                     )
                     job["alarm_sent"] = True
                     job["status"] = "alarm_sent"
@@ -1687,7 +2133,12 @@ async def charging_scheduler(app: Application):
                     moved = move_charging_to_ready(qty)
                     await app.bot.send_message(
                         chat_id=chat_id,
-                        text=f"✅ BATERIE GOTOWE\n🔋 Ilość: {moved}\n\n{status_report()}"
+                        text=(
+                            f"✅ BATERIE NAŁADOWANE\n"
+                            f"🔋 Ilość: {moved}\n"
+                            f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
+                            f"{status_report()}"
+                        )
                     )
                     job["ready_sent"] = True
                     job["status"] = "done"
@@ -1712,17 +2163,95 @@ async def driver_alerts(app: Application):
             for trip in db["trips"]:
                 if trip.get("end") is None:
                     start = datetime.fromisoformat(trip["start"])
-                    hours = (current - start).total_seconds() / 3600
+                    deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+                    qty = int(trip.get("qty", 0))
+                    driver = trip.get("driver", "Nieznany")
+                    chat_id = trip.get("chat_id") or load_group().get("chat_id")
 
-                    if hours >= TIME_LIMIT_HOURS and not trip.get("alert_sent"):
-                        chat_id = trip.get("chat_id") or load_group().get("chat_id")
-                        if chat_id:
+                    if not chat_id:
+                        continue
+
+                    left_minutes = int((deadline - current).total_seconds() // 60)
+
+                    # 60 minut do końca
+                    if left_minutes <= 60 and left_minutes > 15 and not trip.get("alert_60_sent"):
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"⏰ ZEGAREK KIEROWCY
+"
+                                f"🚗 {driver}
+"
+                                f"🔋 W trasie: {qty} baterii
+"
+                                f"Zostało około: {left_minutes} min
+"
+                                f"Deadline: {fmt_dt(deadline)}"
+                            )
+                        )
+                        trip["alert_60_sent"] = True
+                        changed = True
+
+                    # 15 minut do końca
+                    if left_minutes <= 15 and left_minutes >= 0 and not trip.get("alert_15_sent"):
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"🚨 ZA 15 MIN KONIEC CZASU
+"
+                                f"🚗 {driver}
+"
+                                f"🔋 W trasie: {qty} baterii
+"
+                                f"Zostało: {left_minutes} min
+"
+                                f"Deadline: {fmt_dt(deadline)}"
+                            )
+                        )
+                        trip["alert_15_sent"] = True
+                        changed = True
+
+                    # koniec czasu
+                    if left_minutes < 0 and not trip.get("alert_sent"):
+                        late = abs(left_minutes)
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"❌ SKOŃCZYŁ CI SIĘ CZAS
+"
+                                f"🚗 Kierowca: {driver}
+"
+                                f"🔋 Baterie w trasie: {qty}
+"
+                                f"Deadline był o: {fmt_dt(deadline)}
+"
+                                f"Spóźnienie: {late // 60}h {late % 60}min"
+                            )
+                        )
+                        trip["alert_sent"] = True
+                        trip["last_overdue_alert_at"] = current.isoformat()
+                        changed = True
+
+                    # co 30 min po czasie przypomnienie
+                    if left_minutes < -30 and trip.get("alert_sent"):
+                        last_iso = trip.get("last_overdue_alert_at")
+                        last_dt = datetime.fromisoformat(last_iso) if last_iso else start
+                        if (current - last_dt).total_seconds() >= 1800:
+                            late = abs(left_minutes)
                             await app.bot.send_message(
                                 chat_id=chat_id,
-                                text=f"🚨 UWAGA!\n{trip['driver']} kończy czas / jest spóźniony!\n⏱ Limit: {TIME_LIMIT_HOURS}h"
+                                text=(
+                                    f"🚨 NADAL PO CZASIE
+"
+                                    f"🚗 Kierowca: {driver}
+"
+                                    f"🔋 Baterie w trasie: {qty}
+"
+                                    f"Spóźnienie: {late // 60}h {late % 60}min"
+                                )
                             )
-                        trip["alert_sent"] = True
-                        changed = True
+                            trip["last_overdue_alert_at"] = current.isoformat()
+                            changed = True
 
             if changed:
                 save_db(db)
@@ -1731,7 +2260,6 @@ async def driver_alerts(app: Application):
             print("driver_alerts error:", e)
 
         await asyncio.sleep(60)
-
 
 
 async def weekly_report_scheduler(app: Application):
@@ -1772,12 +2300,13 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v6.4 działa...")
+    print("Telegram Lime Battery Bot PRO v6.6 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
