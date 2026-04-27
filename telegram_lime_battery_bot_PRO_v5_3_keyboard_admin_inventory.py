@@ -439,20 +439,21 @@ def parse_time_today(time_text):
     return now().replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
 
 
-def restore_trip_command(text, chat_id):
+def restore_trip_command(text, chat_id, chooser_user_id=None):
     """
-    Po resecie ręcznie odtwarza aktywną trasę:
-    Marcin zabrane 55 start 14:52
-    Karol trasa 40 start 13.27
+    Odtwarza aktywną trasę po resecie albo ręcznie poza kreatorem.
 
-    Nie odejmuje z gotowych — to jest odtworzenie stanu.
+    Obsługiwane formaty:
+    trasa Adam 100 start 07:39
+    Adam zabrane 100 start 07:39
+    Adam 100 start 07:39
+
+    WAŻNE:
+    Funkcja próbuje przypisać trasę do prawdziwego Telegram ID kierowcy
+    z pliku telegram_drivers.json. Jeśli znajdzie kilka osób, admin wybiera numer.
     """
     raw = text.strip()
 
-    # Obsługiwane formaty:
-    # trasa Adam 100 start 07:39
-    # Adam zabrane 100 start 07:39
-    # Adam 100 start 07:39
     match = re.search(
         r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
         raw,
@@ -462,22 +463,77 @@ def restore_trip_command(text, chat_id):
     if not match:
         return None
 
-    driver = match.group(1).strip()
+    driver_query = match.group(1).strip()
     qty = int(match.group(2))
     start_time = parse_time_today(match.group(3))
 
     if qty < 1:
         return "🚨 BŁĄD: trasa musi mieć minimum 1 baterię."
 
-    db = load_db()
+    matches = driver_search(driver_query)
+
+    if not matches:
+        return (
+            f"❌ Nie znalazłem kierowcy dla: {driver_query}\n\n"
+            "Kierowca musi najpierw zostać zapisany.\n\n"
+            "Najprościej w grupie:\n"
+            "1. Kierowca pisze np. Cześć.\n"
+            "2. Admin klika Odpowiedz na tę wiadomość.\n"
+            "3. Admin pisze: dodaj kierowce\n\n"
+            "Potem wpisz trasę jeszcze raz, np.:\n"
+            f"{driver_query} {qty} start {fmt_dt(start_time)}"
+        )
+
+    if len(matches) > 1:
+        if chooser_user_id is None:
+            return (
+                f"🔎 Znalazłem kilku kierowców dla: {driver_query}\n\n"
+                + "\n".join(f"{i}. {item['name']}" for i, item in enumerate(matches, start=1))
+                + "\n\nNie mogę zapisać wyboru, bo brakuje ID admina w funkcji."
+            )
+
+        USER_STATE[str(chooser_user_id)] = {
+            "action": "choose_restore_driver",
+            "matches": matches,
+            "qty": qty,
+            "start": start_time.isoformat(),
+            "chat_id": chat_id,
+            "query": driver_query
+        }
+
+        return (
+            f"🔎 Znalazłem kilku kierowców dla: {driver_query}\n\n"
+            + "\n".join(f"{i}. {item['name']}" for i, item in enumerate(matches, start=1))
+            + "\n\nWpisz numer kierowcy."
+        )
+
+    selected = matches[0]
+    return create_restored_trip(
+        driver=selected["name"],
+        user_id=selected["user_id"],
+        qty=qty,
+        start_time=start_time,
+        chat_id=chat_id
+    )
+
+
+def create_restored_trip(driver, user_id, qty, start_time, chat_id):
+    """
+    Wspólne dodawanie trasy odtworzonej z prawdziwym user_id kierowcy.
+    Magazyn nie jest pomniejszany.
+    """
+    qty = int(qty)
     wanted = normalize_text(driver)
+
+    db = load_db()
 
     db["trips"] = [
         trip for trip in db["trips"]
         if not (
             trip.get("end") is None
             and (
-                normalize_text(trip.get("driver", "")) == wanted
+                str(trip.get("user_id", "")) == str(user_id)
+                or normalize_text(trip.get("driver", "")) == wanted
                 or wanted in normalize_text(trip.get("driver", ""))
                 or normalize_text(trip.get("driver", "")) in wanted
             )
@@ -486,7 +542,7 @@ def restore_trip_command(text, chat_id):
 
     db["trips"].append({
         "driver": driver,
-        "user_id": f"manual:{wanted}",
+        "user_id": str(user_id),
         "chat_id": chat_id,
         "start": start_time.isoformat(),
         "qty": qty,
@@ -503,6 +559,7 @@ def restore_trip_command(text, chat_id):
     return (
         f"✅ ODTWORZONO TRASĘ\n\n"
         f"🚗 {driver}: {qty} baterii\n"
+        f"Telegram ID: {user_id}\n"
         f"Start: {fmt_dt(start_time)}\n"
         f"Deadline: {fmt_dt(deadline)}\n"
         f"📌 Gotowe NIE zostały pomniejszone.\n\n"
@@ -2473,7 +2530,7 @@ def handle_command(text, user, chat_id):
             USER_STATE.pop(user_id, None)
             return admin_restore_charge_reply
 
-        admin_restore_trip_reply = restore_trip_command(text, chat_id)
+        admin_restore_trip_reply = restore_trip_command(text, chat_id, user_id)
         if admin_restore_trip_reply:
             USER_STATE.pop(user_id, None)
             return admin_restore_trip_reply
@@ -2495,6 +2552,29 @@ def handle_command(text, user, chat_id):
     if user_id in USER_STATE:
         state = USER_STATE.pop(user_id)
         action = state.get("action")
+
+        if action == "choose_restore_driver":
+            if not only_number(text):
+                USER_STATE[user_id] = state
+                return "Wpisz sam numer kierowcy z listy."
+
+            idx = int(text.strip()) - 1
+            matches = state.get("matches", [])
+
+            if idx < 0 or idx >= len(matches):
+                USER_STATE[user_id] = state
+                return f"❌ Wybierz numer od 1 do {len(matches)}."
+
+            selected = matches[idx]
+            start_time = datetime.fromisoformat(state["start"])
+
+            return create_restored_trip(
+                driver=selected["name"],
+                user_id=selected["user_id"],
+                qty=state["qty"],
+                start_time=start_time,
+                chat_id=state.get("chat_id") or chat_id
+            )
 
         if action in ["gotowe", "ladowarka", "oczekuja", "depo"]:
             if not only_number(text):
@@ -2567,7 +2647,7 @@ def handle_command(text, user, chat_id):
             return "❌ Odtwarzanie stanu jest tylko dla administratora."
         return restore_inventory_reply
 
-    restore_trip_reply = restore_trip_command(text, chat_id)
+    restore_trip_reply = restore_trip_command(text, chat_id, user_id)
     if restore_trip_reply:
         if not is_admin(user):
             return "❌ Odtwarzanie trasy jest tylko dla administratora."
@@ -3023,6 +3103,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
