@@ -23,9 +23,9 @@ DRIVERS_FILE = "telegram_drivers.json"
 FILE_LOCK = threading.RLock()
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
-# Przykład: ADMIN_IDS = {"123456789"}
+# Przykład: ADMIN_IDS = {"6030936882"}
 # UWAGA: pusta lista oznacza BRAK administratorów.
-ADMIN_IDS = {"6030936882"}
+ADMIN_IDS = {"123456789"}
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -50,7 +50,7 @@ DRIVER_ID_BOOK = {
         "aliases": ["michal kasi", "ml", "kasi", "2"]
     },
     "md": {
-        "id": "7247279842",
+        "id": "8635659517",
         "name": "Michal Kierowca Od Dobosza",
         "aliases": ["michal dobosza", "md", "3"]
     },
@@ -62,7 +62,7 @@ DRIVER_ID_BOOK = {
     "pm": {
         "id": "6921903873",
         "name": "Pawel Drewni Movano",
-        "aliases": ["pm", "drewni", "pawel drewni", "5"]
+        "aliases": ["pawel drewni", "drewni", "movano", "pm", "5"]
     },
     "wk": {
         "id": "8226089815",
@@ -77,17 +77,17 @@ DRIVER_ID_BOOK = {
     "pk": {
         "id": "7733740199",
         "name": "Paulinka Moja Księżniczka",
-        "aliases": ["paulina", "pk", "9", "12"]
+        "aliases": ["paulina", "paulinka", "pk", "9", "12"]
     },
     "kp": {
         "id": "1051855484",
         "name": "Krzysztof Kierowca Tomasz Pie",
-        "aliases": ["krzysztof", "kp", "tomasz", "10"]
+        "aliases": ["krzysztof", "tomasz", "kp", "10"]
     },
     "pl": {
         "id": "8220348868",
         "name": "Pawel Hanslow Lima",
-        "aliases": ["pawel hanslow", "pl", "11"]
+        "aliases": ["pawel hanslow", "hanslow", "pl", "11"]
     },
     "kris": {
         "id": "6030936882",
@@ -97,7 +97,7 @@ DRIVER_ID_BOOK = {
     "mz": {
         "id": "7794225975",
         "name": "Martinez Kierowca Mitcham Na Lima",
-        "aliases": ["martinez", "mz", "mitcham", "14"]
+        "aliases": ["martinez", "mitcham", "mz", "14"]
     }
 }
 
@@ -224,8 +224,16 @@ def load_drivers():
         if isinstance(aliases, str):
             aliases = [aliases]
 
-        existing = data.get(uid, {})
-        data[uid] = {
+        # Normalnie kluczem jest Telegram ID. Jeśli dwa wpisy mają ten sam Telegram ID
+        # (np. osobne numery 1 i 3 na tym samym koncie), robimy unikalny klucz ręczny,
+        # żeby wyszukiwarka nie nadpisywała jednego kierowcy drugim.
+        data_key = uid
+        existing = data.get(data_key, {})
+        if existing and existing.get("code") and existing.get("code") != str(code):
+            data_key = f"manual:{code}:{uid}"
+            existing = data.get(data_key, {})
+
+        data[data_key] = {
             "id": uid,
             "name": existing.get("name") or name,
             "first_name": existing.get("first_name") or name.split()[0],
@@ -351,12 +359,17 @@ def driver_search(query):
         normalized_candidates = [normalize_text(str(x)).strip().lstrip("@") for x in candidates if x]
         searchable = " ".join(normalized_candidates)
 
-        # 1 litera ma działać jako kod lub początek imienia/nazwy.
-        matched = (
-            any(c == q for c in normalized_candidates)
-            or any(c.startswith(q) for c in normalized_candidates)
-            or q in searchable
-        )
+        # Numery kierowców muszą pasować TYLKO dokładnie.
+        # Dzięki temu "4" nie łapie "14", ID zawierającego 4 ani innych przypadkowych tekstów.
+        if q.isdigit():
+            matched = any(c == q for c in normalized_candidates)
+        else:
+            # Litery nadal działają elastycznie: kod, początek imienia/nazwy albo alias.
+            matched = (
+                any(c == q for c in normalized_candidates)
+                or any(c.startswith(q) for c in normalized_candidates)
+                or q in searchable
+            )
 
         if matched:
             display_name = (
@@ -578,6 +591,7 @@ def get_keyboard(user=None):
     if user is not None and is_admin(user):
         base += [
             ["Status", "Trasy"],
+            ["Kierowcy", "Numery"],
             ["Depo", "Ogłoszenie", "Alert"],
         ]
 
@@ -1877,6 +1891,12 @@ def handle_reset_wizard(text, user, chat_id):
         )
 
     if step == "trips":
+        if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
+            return driver_numbers_text()
+
+        if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+            return drivers_list_text()
+
         pending = wiz.get("pending_driver_choice")
 
         if pending:
@@ -2693,6 +2713,32 @@ def charging_status():
     return "\n".join(lines)
 
 
+
+def driver_numbers_text():
+    lines = [
+        "🔢 NUMERY KIEROWCÓW",
+        "",
+        "1 — Luke Dobosz Od Petera",
+        "2 — Michal Od Kasi Kosmet Londyn",
+        "3 — Michal Kierowca Od Dobosza",
+        "4 — Piter",
+        "5 — Pawel Drewni Movano",
+        "7 — Waldek Nw Lima Kierowca",
+        "8 — Alex Puchalski Lima",
+        "9 — Paulinka Moja Księżniczka",
+        "10 — Krzysztof Kierowca Tomasz Pie",
+        "11 — Pawel Hanslow Lima",
+        "12 — Paulinka Moja Księżniczka",
+        "13 — Kris",
+        "14 — Martinez Kierowca Mitcham Na Lima",
+        "",
+        "Format trasy:",
+        "1 50 start 12:00",
+        "14 60 start 16:40"
+    ]
+    return "\n".join(lines)
+
+
 def help_text():
     return (
         "📌 KOMENDY / MENU:\n\n"
@@ -2861,6 +2907,11 @@ def handle_command(text, user, chat_id):
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
+
+    if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
+        if not is_admin(user):
+            return "❌ Numery kierowców są tylko dla administratora."
+        return driver_numbers_text()
 
     if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
         if not is_admin(user):
