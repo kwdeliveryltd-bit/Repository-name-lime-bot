@@ -23,9 +23,9 @@ DRIVERS_FILE = "telegram_drivers.json"
 FILE_LOCK = threading.RLock()
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
-# Przykład: ADMIN_IDS = {"6030936882"}
+# Przykład: ADMIN_IDS = {"123456789"}
 # UWAGA: pusta lista oznacza BRAK administratorów.
-ADMIN_IDS = {"123456789"}
+ADMIN_IDS = {"6030936882"}
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -39,47 +39,66 @@ ADMIN_IDS = {"123456789"}
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
 DRIVER_ID_BOOK = {
-    # Dodani ręcznie na stałe — bot będzie ich znał nawet po resecie plików JSON.
-    "l": {
-        "id": "8635659517",
-        "name": "Luke Dobosz",
-        "aliases": ["l", "luk", "luke", "luke dobosz"]
+    "ml": {
+        "id": "6651434498",
+        "name": "Michal Od Kasi Kosmet Londyn",
+        "aliases": ["michal kasi", "ml", "kasi"]
     },
-    "k": {
-        "id": "1051855484",
-        "name": "Krzysztof",
-        "aliases": ["k", "kris", "krzysztof"]
-    },
-    "a": {
-        "id": "8768227091",
-        "name": "Adam Od Dobosza Lima",
-        "aliases": ["a", "adam", "adam od dobosza", "adam lima"]
-    },
-    "p": {
-        "id": "8220348868",
-        "name": "Pawel Hanslow Lima",
-        "aliases": ["p", "paw", "pawel", "paweł", "pawel hanslow", "paweł hanslow", "pawel lima"]
-    },
-    "w": {
+    "wk": {
         "id": "8226089815",
-        "name": "Waldek NW Lima Kierowca",
-        "aliases": ["w", "wal", "waldek", "waldek nw", "waldek lima"]
+        "name": "Waldek Nw Lima Kierowca",
+        "aliases": ["waldek", "wk"]
     },
-    "pi": {
-        "id": "8006256107",
-        "name": "Piter",
-        "aliases": ["pi", "pit", "piter"]
+    "lp": {
+        "id": "8635659517",
+        "name": "Luke Dobosz Od Petera",
+        "aliases": ["luke", "lp", "dobosz"]
     },
-    "pd": {
-        "id": "6921903873",
-        "name": "Pawel Drewni Moyano",
-        "aliases": ["pd", "drewni", "pawel drewni", "paweł drewni", "moyano"]
+    "kp": {
+        "id": "1051855484",
+        "name": "Krzysztof Kierowca Tomasz Pie",
+        "aliases": ["krzysztof", "kp", "tomasz"]
+    },
+    "mz": {
+        "id": "7794225975",
+        "name": "Martinez Kierowca Mitcham Na Lima",
+        "aliases": ["martinez", "mz", "mitcham"]
     },
     "al": {
         "id": "8087250524",
         "name": "Alex Puchalski Lima",
-        "aliases": ["al", "alex", "alex puchalski"]
+        "aliases": ["alex", "al"]
     },
+    "pm": {
+        "id": "6921903873",
+        "name": "Pawel Drewni Movano",
+        "aliases": ["pawel drewni", "pm", "drewni"]
+    },
+    "md": {
+        "id": "8635659517",
+        "name": "Michal Kierowca Od Dobosza",
+        "aliases": ["michal dobosza", "md"]
+    },
+    "p": {
+        "id": "8006256107",
+        "name": "Piter",
+        "aliases": ["piter", "p"]
+    },
+    "pl": {
+        "id": "8220348868",
+        "name": "Pawel Hanslow Lima",
+        "aliases": ["pawel hanslow", "pl"]
+    },
+    "al2": {
+        "id": "8768227091",
+        "name": "Adam Od Dobosza Lima",
+        "aliases": ["adam", "al2"]
+    },
+    "pk": {
+        "id": "7733740199",
+        "name": "Paulinka Moja Księżniczka",
+        "aliases": ["paulina", "pk"]
+    }
 }
 
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
