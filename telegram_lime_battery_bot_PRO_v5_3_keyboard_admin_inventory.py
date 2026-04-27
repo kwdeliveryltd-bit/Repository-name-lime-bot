@@ -989,6 +989,9 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+        return drivers_list_text()
+
     if t in ["anuluj", "cancel", "stop"]:
         clear_driver_flow(user.id)
         return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
@@ -1650,8 +1653,10 @@ def handle_reset_wizard(text, user, chat_id):
         if not matches:
             return (
                 f"❌ Nie znalazłem kierowcy dla: {driver_query}\n\n"
-                "Kierowca musi najpierw napisać cokolwiek do bota, np. Pomoc,\n"
-                "żeby bot zapamiętał jego Telegram ID.\n\n"
+                "Najpewniejszy sposób zapisu w grupie:\n"
+                "1. Kierowca pisze wiadomość na grupie, np. Cześć.\n"
+                "2. Ty odpowiadasz na JEGO wiadomość tekstem: dodaj kierowce\n\n"
+                "Alternatywnie kierowca może napisać do bota prywatnie /start albo Pomoc.\n\n"
                 "Możesz sprawdzić zapisanych kierowców komendą: kierowcy"
             )
 
@@ -2777,7 +2782,44 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
+    # Zapamiętujemy autora każdej wiadomości, którą bot widzi.
     remember_driver(update.message.from_user)
+
+    # WAŻNE W GRUPIE:
+    # Jeśli Telegram ma włączoną prywatność bota, bot może nie widzieć zwykłych wiadomości kierowców.
+    # Dlatego admin może odpowiedzieć na wiadomość kierowcy tekstem: "dodaj kierowce".
+    # Wtedy zapisujemy ID osoby, na której wiadomość admin odpowiedział.
+    normalized_message = normalize_text(update.message.text).strip()
+    if normalized_message in ["dodaj kierowce", "dodaj kierowcę", "zapisz kierowce", "zapisz kierowcę"]:
+        keyboard = get_keyboard(update.message.from_user)
+
+        if not is_admin(update.message.from_user):
+            await update.message.reply_text("❌ Tylko administrator może ręcznie dodawać kierowców.", reply_markup=keyboard)
+            return
+
+        if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+            await update.message.reply_text(
+                "Odpowiedz tym tekstem na wiadomość kierowcy:\n\n"
+                "dodaj kierowce",
+                reply_markup=keyboard
+            )
+            return
+
+        target_user = update.message.reply_to_message.from_user
+        remember_driver(target_user)
+        await update.message.reply_text(
+            f"✅ Kierowca zapisany:\n"
+            f"{get_driver_name(target_user)}\n"
+            f"Telegram ID: {target_user.id}\n\n"
+            "Teraz w resecie możesz wpisać np.:\n"
+            f"{target_user.first_name or get_driver_name(target_user)} 55 start 14:52",
+            reply_markup=keyboard
+        )
+        return
+
+    # Dodatkowo, jeśli bot widzi odpowiedź na czyjąś wiadomość, też zapamięta tę osobę.
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        remember_driver(update.message.reply_to_message.from_user)
 
     keyboard = get_keyboard(update.message.from_user)
     reply = handle_command(update.message.text, update.message.from_user, update.message.chat_id)
@@ -2981,4 +3023,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
