@@ -3,6 +3,7 @@ import json
 import math
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,9 +20,12 @@ DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
 
+FILE_LOCK = threading.RLock()
+
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
 # Przykład: ADMIN_IDS = {"123456789"}
-ADMIN_IDS = set()
+# UWAGA: pusta lista oznacza BRAK administratorów.
+ADMIN_IDS = {"123456789"}
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -72,20 +76,33 @@ def normalize_text(text):
 
 
 def load_json(path, default):
-    if not os.path.exists(path):
-        save_json(path, default)
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        save_json(path, default)
-        return default
+    with FILE_LOCK:
+        if not os.path.exists(path):
+            save_json(path, default)
+            return default
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            # Jeśli JSON jest uszkodzony, zachowujemy kopię awaryjną i tworzymy świeży plik.
+            try:
+                broken_path = f"{path}.broken-{now().strftime('%Y%m%d-%H%M%S')}"
+                os.replace(path, broken_path)
+            except Exception:
+                pass
+            save_json(path, default)
+            return default
 
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # Atomowy zapis zmniejsza ryzyko uszkodzenia JSON przy przerwaniu procesu.
+    with FILE_LOCK:
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
 
 
 def load_db():
@@ -481,9 +498,9 @@ def find_number_near(words, text):
 
 
 def is_admin(user):
-    # TEST MODE: gdy ADMIN_IDS jest puste, każdy może testować admin-komendy.
-    # Produkcyjnie wpisz swoje ID: ADMIN_IDS = {"123456789"}
-    return not ADMIN_IDS or str(user.id) in ADMIN_IDS
+    # Produkcyjnie wpisz swoje Telegram ID w ADMIN_IDS.
+    # Pusta lista ADMIN_IDS oznacza brak administratorów, a nie tryb testowy.
+    return bool(user) and str(user.id) in ADMIN_IDS
 
 
 def get_keyboard(user=None):
@@ -622,9 +639,19 @@ def status_report():
 
 
 def parse_time_today(time_text):
-    cleaned = time_text.replace(".", ":")
-    hour, minute = cleaned.split(":")
-    return now().replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    cleaned = time_text.replace(".", ":").strip()
+
+    try:
+        hour, minute = cleaned.split(":")
+        hour = int(hour)
+        minute = int(minute)
+    except Exception:
+        raise ValueError("Nieprawidłowy format czasu")
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("Nieprawidłowa godzina")
+
+    return now().replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
 
@@ -651,7 +678,10 @@ def restore_trip_command(text, chat_id, chooser_user_id=None):
 
     driver_query = match.group(1).strip()
     qty = int(match.group(2))
-    start_time = parse_time_today(match.group(3))
+    try:
+        start_time = parse_time_today(match.group(3))
+    except Exception:
+        return "❌ Nieprawidłowa godzina startu. Użyj np. 14:52"
 
     if qty < 1:
         return "🚨 BŁĄD: trasa musi mieć minimum 1 baterię."
@@ -723,7 +753,10 @@ def restore_charging_command(text, chat_id):
         return None
 
     qty = int(match.group(1))
-    start_time = parse_time_today(match.group(2))
+    try:
+        start_time = parse_time_today(match.group(2))
+    except Exception:
+        return "❌ Nieprawidłowa godzina startu ładowania. Użyj np. 13:24"
 
     if qty < 1:
         return "🚨 BŁĄD: ładowarki muszą mieć minimum 1 baterię."
@@ -1590,12 +1623,21 @@ def start_reset_wizard(user, chat_id):
 
 def parse_wizard_time(text):
     t = normalize_text(text).strip()
+
     if t in ["teraz", "now"]:
         return now()
+
     m = re.search(r"(\d{1,2})[:.](\d{2})", text)
     if not m:
         return None
-    return now().replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    return now().replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
 def handle_reset_wizard(text, user, chat_id):
@@ -2155,7 +2197,13 @@ def set_inventory_command(text):
 
 def take_from_ready(qty):
     inv = load_inventory()
-    inv["ready"] = max(0, int(inv.get("ready", 0)) - int(qty))
+    ready = int(inv.get("ready", 0))
+    qty = int(qty)
+
+    if qty > ready:
+        raise ValueError(f"Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {qty}")
+
+    inv["ready"] = ready - qty
     save_inventory(inv)
 
 
@@ -2624,6 +2672,19 @@ def handle_command(text, user, chat_id):
     user_id = str(user.id)
     responses = []
 
+    # Obsługa wyboru kierowcy po numerze po liście.
+    restore_choice_reply = handle_restore_driver_choice(text, user, chat_id)
+    if restore_choice_reply:
+        return restore_choice_reply
+
+    # Ręczne dodanie kierowcy:
+    # dodaj id a 123456789 Adam Nowak
+    add_driver_reply = add_driver_id_command(text)
+    if add_driver_reply:
+        if not is_admin(user):
+            return "❌ Tylko administrator może dodawać kierowców."
+        return add_driver_reply
+
     # RESET ma ZAWSZE pierwszeństwo, nawet gdy bot jest w środku formularza/wizarda.
     if t in ["reset", "reset wszystko", "reset system"]:
         if not is_admin(user):
@@ -2667,7 +2728,6 @@ def handle_command(text, user, chat_id):
 
         admin_restore_trip_reply = restore_trip_command(text, chat_id, user_id)
         if admin_restore_trip_reply:
-            USER_STATE.pop(user_id, None)
             return admin_restore_trip_reply
 
         if "start" in t:
@@ -2908,35 +2968,12 @@ def handle_command(text, user, chat_id):
                 return reply + "\n\n" + flow_reply
         return reply
 
-    if returned_qty is not None:
-        trip = active_trip(db, user_id)
-        if not trip:
-            responses.append("Brak aktywnej trasy do zamknięcia.")
-        elif returned_qty > int(trip["qty"]):
-            responses.append(f"❌ Błąd: oddajesz więcej ({returned_qty}) niż wziąłeś/wzięłaś ({trip['qty']}).")
-        else:
-            end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned_qty)
-            trip["end"] = end_time.isoformat()
-            trip["returned"] = returned_qty
-            trip["charged_inside"] = charged_inside
-            trip["hours"] = hours
-            trip["late_hours"] = late_hours
-            trip["rate"] = rate
-            trip["earned"] = earned
-
-            ready_added, waiting_added = returned_to_inventory(returned_qty, charged_inside)
-            state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
-            responses.append(
-                f"{name} zamknął/zamknęła trasę:\n"
-                f"Oddane: {returned_qty}\n"
-                f"Naładowane/gotowe: {ready_added}\n"
-                f"Oczekujące: {waiting_added}\n"
-                f"Czas: {fmt_hours(hours)}\n"
-                f"Status: {state}\n"
-                f"Zarobek: £{earned:.2f}"
-            )
-
     if take_qty is not None:
+        inv = load_inventory()
+        ready = int(inv.get("ready", 0))
+        if take_qty > ready:
+            return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {take_qty}"
+
         existing = active_trip(db, user_id)
         if existing:
             responses.append(f"Uwaga: {name} ma już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: oddalem X")
@@ -3202,8 +3239,8 @@ async def post_init(app: Application):
 
 
 def main():
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "WKLEJ_TUTAJ_NOWY_TOKEN":
-        print("BRAK TOKENA TELEGRAM — wklej token w pliku albo ustaw TELEGRAM_TOKEN")
+    if not TELEGRAM_TOKEN:
+        print("BRAK TOKENA TELEGRAM — ustaw zmienną środowiskową TELEGRAM_TOKEN")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
@@ -3215,6 +3252,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
