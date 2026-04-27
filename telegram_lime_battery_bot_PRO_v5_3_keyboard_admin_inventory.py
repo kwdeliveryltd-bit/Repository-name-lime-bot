@@ -39,68 +39,77 @@ ADMIN_IDS = {"6030936882"}
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
 DRIVER_ID_BOOK = {
-    "lp": {
+    "1": {
         "id": "8635659517",
-        "name": "Luke Dobosz Od Petera",
-        "aliases": ["luke", "lp", "dobosz", "1"]
+        "name": "Luke",
+        "aliases": ["1", "luke", "lp"]
     },
-    "ml": {
+    "2": {
         "id": "6651434498",
-        "name": "Michal Od Kasi Kosmet Londyn",
-        "aliases": ["michal kasi", "ml", "kasi", "2"]
+        "name": "Michał S",
+        "aliases": ["2", "michal s", "ml"]
     },
-    "md": {
-        "id": "8635659517",
-        "name": "Michal Kierowca Od Dobosza",
-        "aliases": ["michal dobosza", "md", "3"]
+    "3": {
+        "id": "7247279842",
+        "name": "Michał P",
+        "aliases": ["3", "michal p", "md"]
     },
-    "p": {
+    "4": {
         "id": "8006256107",
         "name": "Piter",
-        "aliases": ["piter", "p", "4"]
+        "aliases": ["4", "piter"]
     },
-    "pm": {
+    "5": {
         "id": "6921903873",
-        "name": "Pawel Drewni Movano",
-        "aliases": ["pawel drewni", "drewni", "movano", "pm", "5"]
+        "name": "Paweł LEGIA",
+        "aliases": ["5", "pawel", "legia"]
     },
-    "wk": {
+    "6": {
+        "id": "",
+        "name": "WOLNY",
+        "aliases": ["6"]
+    },
+    "7": {
         "id": "8226089815",
-        "name": "Waldek Nw Lima Kierowca",
-        "aliases": ["waldek", "wk", "7"]
+        "name": "Waldek",
+        "aliases": ["7", "waldek"]
     },
-    "al": {
+    "8": {
         "id": "8087250524",
-        "name": "Alex Puchalski Lima",
-        "aliases": ["alex", "al", "8"]
+        "name": "Alex",
+        "aliases": ["8", "alex"]
     },
-    "pk": {
+    "9": {
         "id": "7733740199",
-        "name": "Paulinka Moja Księżniczka",
-        "aliases": ["paulina", "paulinka", "pk", "9", "12"]
+        "name": "Paulina",
+        "aliases": ["9", "paulina"]
     },
-    "kp": {
+    "10": {
         "id": "1051855484",
-        "name": "Krzysztof Kierowca Tomasz Pie",
-        "aliases": ["krzysztof", "tomasz", "kp", "10"]
+        "name": "Krzysztof",
+        "aliases": ["10", "krzysztof"]
     },
-    "pl": {
+    "11": {
         "id": "8220348868",
-        "name": "Pawel Hanslow Lima",
-        "aliases": ["pawel hanslow", "hanslow", "pl", "11"]
+        "name": "Paweł J",
+        "aliases": ["11", "pawel j"]
     },
-    "kris": {
+    "12": {
+        "id": "",
+        "name": "WOLNY",
+        "aliases": ["12"]
+    },
+    "13": {
         "id": "6030936882",
         "name": "Kris",
-        "aliases": ["kris", "13"]
+        "aliases": ["13", "kris"]
     },
-    "mz": {
+    "14": {
         "id": "7794225975",
-        "name": "Martinez Kierowca Mitcham Na Lima",
-        "aliases": ["martinez", "mitcham", "mz", "14"]
+        "name": "Martinez",
+        "aliases": ["14", "martinez"]
     }
 }
-
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
 
