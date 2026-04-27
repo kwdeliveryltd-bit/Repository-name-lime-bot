@@ -39,65 +39,65 @@ ADMIN_IDS = {"6030936882"}
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
 DRIVER_ID_BOOK = {
-    "ml": {
-        "id": "6651434498",
-        "name": "Michal Od Kasi Kosmet Londyn",
-        "aliases": ["michal kasi", "ml", "kasi"]
-    },
-    "wk": {
-        "id": "8226089815",
-        "name": "Waldek Nw Lima Kierowca",
-        "aliases": ["waldek", "wk"]
-    },
     "lp": {
         "id": "8635659517",
         "name": "Luke Dobosz Od Petera",
-        "aliases": ["luke", "lp", "dobosz"]
+        "aliases": ["luke", "lp", "dobosz", "1"]
     },
-    "kp": {
-        "id": "1051855484",
-        "name": "Krzysztof Kierowca Tomasz Pie",
-        "aliases": ["krzysztof", "kp", "tomasz"]
-    },
-    "mz": {
-        "id": "7794225975",
-        "name": "Martinez Kierowca Mitcham Na Lima",
-        "aliases": ["martinez", "mz", "mitcham"]
-    },
-    "al": {
-        "id": "8087250524",
-        "name": "Alex Puchalski Lima",
-        "aliases": ["alex", "al"]
-    },
-    "pm": {
-        "id": "6921903873",
-        "name": "Pawel Drewni Movano",
-        "aliases": ["pawel drewni", "pm", "drewni"]
+    "ml": {
+        "id": "6651434498",
+        "name": "Michal Od Kasi Kosmet Londyn",
+        "aliases": ["michal kasi", "ml", "kasi", "2"]
     },
     "md": {
-        "id": "8635659517",
+        "id": "7247279842",
         "name": "Michal Kierowca Od Dobosza",
-        "aliases": ["michal dobosza", "md"]
+        "aliases": ["michal dobosza", "md", "3"]
     },
     "p": {
         "id": "8006256107",
         "name": "Piter",
-        "aliases": ["piter", "p"]
+        "aliases": ["piter", "p", "4"]
     },
-    "pl": {
-        "id": "8220348868",
-        "name": "Pawel Hanslow Lima",
-        "aliases": ["pawel hanslow", "pl"]
+    "pm": {
+        "id": "6921903873",
+        "name": "Pawel Drewni Movano",
+        "aliases": ["pm", "drewni", "pawel drewni", "5"]
     },
-    "al2": {
-        "id": "8768227091",
-        "name": "Adam Od Dobosza Lima",
-        "aliases": ["adam", "al2"]
+    "wk": {
+        "id": "8226089815",
+        "name": "Waldek Nw Lima Kierowca",
+        "aliases": ["waldek", "wk", "7"]
+    },
+    "al": {
+        "id": "8087250524",
+        "name": "Alex Puchalski Lima",
+        "aliases": ["alex", "al", "8"]
     },
     "pk": {
         "id": "7733740199",
         "name": "Paulinka Moja Księżniczka",
-        "aliases": ["paulina", "pk"]
+        "aliases": ["paulina", "pk", "9", "12"]
+    },
+    "kp": {
+        "id": "1051855484",
+        "name": "Krzysztof Kierowca Tomasz Pie",
+        "aliases": ["krzysztof", "kp", "tomasz", "10"]
+    },
+    "pl": {
+        "id": "8220348868",
+        "name": "Pawel Hanslow Lima",
+        "aliases": ["pawel hanslow", "pl", "11"]
+    },
+    "kris": {
+        "id": "6030936882",
+        "name": "Kris",
+        "aliases": ["kris", "13"]
+    },
+    "mz": {
+        "id": "7794225975",
+        "name": "Martinez Kierowca Mitcham Na Lima",
+        "aliases": ["martinez", "mz", "mitcham", "14"]
     }
 }
 
