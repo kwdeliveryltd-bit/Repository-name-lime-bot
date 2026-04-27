@@ -17,6 +17,7 @@ GROUP_FILE = "telegram_group.json"
 DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
+DRIVERS_FILE = "telegram_drivers.json"
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
 # Przykład: ADMIN_IDS = {"123456789"}
@@ -111,6 +112,101 @@ def load_group():
 
 def save_group(chat_id):
     save_json(GROUP_FILE, {"chat_id": chat_id})
+
+def load_drivers():
+    return load_json(DRIVERS_FILE, {})
+
+
+def save_drivers(data):
+    save_json(DRIVERS_FILE, data)
+
+
+def remember_driver(user):
+    """
+    Zapamiętuje osobę, która napisała do bota.
+    Dzięki temu admin przy resecie może wpisać np.:
+    p 55 start 14:52
+    a bot pokaże pasujących kierowców i zapisze trasę na prawdziwe Telegram ID.
+    """
+    if not user:
+        return
+
+    data = load_drivers()
+    uid = str(user.id)
+
+    data[uid] = {
+        "id": uid,
+        "name": get_driver_name(user),
+        "first_name": user.first_name or "",
+        "full_name": user.full_name or "",
+        "username": user.username or ""
+    }
+
+    save_drivers(data)
+
+
+def driver_search(query):
+    """
+    Szuka kierowców po fragmencie imienia, nazwiska albo username.
+    Zwraca listę pasujących osób z prawdziwym Telegram ID.
+    """
+    q = normalize_text(query).strip().lstrip("@")
+    if not q:
+        return []
+
+    results = []
+    drivers = load_drivers()
+
+    for uid, info in drivers.items():
+        candidates = [
+            info.get("name", ""),
+            info.get("first_name", ""),
+            info.get("full_name", ""),
+            info.get("username", ""),
+        ]
+
+        normalized_candidates = [normalize_text(x).strip().lstrip("@") for x in candidates if x]
+        searchable = " ".join(normalized_candidates)
+
+        if any(c.startswith(q) for c in normalized_candidates) or q in searchable:
+            display_name = (
+                info.get("name")
+                or info.get("full_name")
+                or info.get("first_name")
+                or info.get("username")
+                or uid
+            )
+            results.append({
+                "user_id": uid,
+                "name": display_name,
+                "username": info.get("username", "")
+            })
+
+    # Usuń duplikaty i sortuj stabilnie po nazwie
+    unique = {}
+    for item in results:
+        unique[item["user_id"]] = item
+
+    return sorted(unique.values(), key=lambda x: normalize_text(x["name"]))
+
+
+def drivers_list_text():
+    drivers = load_drivers()
+    if not drivers:
+        return (
+            "👥 KIEROWCY\n\n"
+            "Brak zapisanych kierowców.\n\n"
+            "Każdy kierowca musi napisać cokolwiek do bota, np. Pomoc, "
+            "żeby bot zapamiętał jego Telegram ID."
+        )
+
+    lines = ["👥 ZAPISANI KIEROWCY", ""]
+    for item in sorted(drivers.values(), key=lambda x: normalize_text(x.get("name", ""))):
+        username = f" @{item.get('username')}" if item.get("username") else ""
+        lines.append(f"• {item.get('name') or item.get('id')}{username} — ID: {item.get('id')}")
+
+    return "\n".join(lines)
+
 
 def load_driver_checks():
     return load_json(DRIVER_CHECK_FILE, {})
@@ -1284,7 +1380,8 @@ def start_reset_wizard(user, chat_id):
         "charge_start": None,
         "ready": 0,
         "waiting": 0,
-        "trips": []
+        "trips": [],
+        "pending_driver_choice": None
     }
     save_reset_wizard(data)
 
@@ -1326,6 +1423,9 @@ def handle_reset_wizard(text, user, chat_id):
     if t in ["zatwierdz", "zatwierdź", "ok", "koniec"]:
         if wiz.get("step") != "trips":
             return "Jeszcze nie skończyliśmy. Uzupełnij aktualny krok albo wpisz: anuluj"
+
+        if wiz.get("pending_driver_choice"):
+            return "Najpierw wybierz kierowcę z listy numerem albo wpisz: anuluj"
 
         inv = load_inventory()
         inv["depot_total"] = int(wiz.get("depot_total", 0))
@@ -1479,6 +1579,44 @@ def handle_reset_wizard(text, user, chat_id):
         )
 
     if step == "trips":
+        pending = wiz.get("pending_driver_choice")
+
+        if pending:
+            choice = number_from_text(text)
+
+            if choice is None:
+                return "Wpisz numer kierowcy z listy albo wpisz: anuluj"
+
+            matches = pending.get("matches", [])
+            if choice < 1 or choice > len(matches):
+                return f"Wybierz numer od 1 do {len(matches)}."
+
+            selected = matches[choice - 1]
+
+            wiz.setdefault("trips", []).append({
+                "driver": selected["name"],
+                "user_id": selected["user_id"],
+                "qty": int(pending["qty"]),
+                "start": pending["start"]
+            })
+
+            wiz["pending_driver_choice"] = None
+            data[key] = wiz
+            save_reset_wizard(data)
+
+            total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
+            start_dt = datetime.fromisoformat(pending["start"])
+
+            return (
+                f"✅ Dodano trasę:\n"
+                f"{selected['name']}: {pending['qty']} baterii, start {fmt_dt(start_dt)}\n"
+                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
+                f"Razem w trasie z resetu: {total_routes}\n\n"
+                "Dodaj następną trasę, np.:\n"
+                "p 55 start 14:52\n"
+                "albo wpisz: zatwierdz"
+            )
+
         patterns = [
             r"^trasa\s+(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
             r"^(.+?)\s+zabrane\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
@@ -1494,32 +1632,73 @@ def handle_reset_wizard(text, user, chat_id):
             return (
                 "Nie rozumiem trasy.\n\n"
                 "Użyj np.:\n"
-                "trasa Adam 100 start 07:39\n"
+                "p 55 start 14:52\n"
+                "paw 55 start 14:52\n"
+                "trasa Pawel 55 start 14:52\n"
                 "albo wpisz: zatwierdz"
             )
 
-        driver = m.group(1).strip()
+        driver_query = m.group(1).strip()
         qty = int(m.group(2))
         dt = parse_wizard_time(m.group(3))
+
         if qty < 1:
             return "Trasa musi mieć minimum 1 baterię."
 
-        wiz.setdefault("trips", []).append({
-            "driver": driver,
+        matches = driver_search(driver_query)
+
+        if not matches:
+            return (
+                f"❌ Nie znalazłem kierowcy dla: {driver_query}\n\n"
+                "Kierowca musi najpierw napisać cokolwiek do bota, np. Pomoc,\n"
+                "żeby bot zapamiętał jego Telegram ID.\n\n"
+                "Możesz sprawdzić zapisanych kierowców komendą: kierowcy"
+            )
+
+        if len(matches) == 1:
+            selected = matches[0]
+
+            wiz.setdefault("trips", []).append({
+                "driver": selected["name"],
+                "user_id": selected["user_id"],
+                "qty": qty,
+                "start": dt.isoformat()
+            })
+
+            data[key] = wiz
+            save_reset_wizard(data)
+
+            total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
+
+            return (
+                f"✅ Dodano trasę:\n"
+                f"{selected['name']}: {qty} baterii, start {fmt_dt(dt)}\n"
+                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
+                f"Razem w trasie z resetu: {total_routes}\n\n"
+                "Dodaj następną trasę albo wpisz: zatwierdz"
+            )
+
+        wiz["pending_driver_choice"] = {
             "qty": qty,
-            "start": dt.isoformat()
-        })
+            "start": dt.isoformat(),
+            "matches": matches
+        }
+
         data[key] = wiz
         save_reset_wizard(data)
 
-        total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
+        lines = [f"🔎 Znalazłem kilku kierowców dla: {driver_query}", ""]
 
-        return (
-            f"✅ Dodano trasę:\n"
-            f"{driver}: {qty} baterii, start {fmt_dt(dt)}\n\n"
-            f"Razem w trasie z resetu: {total_routes}\n\n"
-            "Dodaj następnego kierowcę albo wpisz: zatwierdz"
-        )
+        for i, item in enumerate(matches, start=1):
+            username = f" @{item.get('username')}" if item.get("username") else ""
+            lines.append(f"{i}. {item['name']}{username}")
+
+        lines += [
+            "",
+            "Wpisz numer kierowcy, którego chcesz dodać."
+        ]
+
+        return "\n".join(lines)
 
     return "Błąd kreatora resetu. Wpisz: reset"
 
@@ -2365,6 +2544,12 @@ def handle_command(text, user, chat_id):
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
 
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+        if not is_admin(user):
+            return "❌ Lista kierowców jest tylko dla administratora."
+        return drivers_list_text()
+
+
     reset_reply = reset_all_command(text)
     if reset_reply:
         if not is_admin(user):
@@ -2592,6 +2777,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
+    remember_driver(update.message.from_user)
+
     keyboard = get_keyboard(update.message.from_user)
     reply = handle_command(update.message.text, update.message.from_user, update.message.chat_id)
 
@@ -2794,8 +2981,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
