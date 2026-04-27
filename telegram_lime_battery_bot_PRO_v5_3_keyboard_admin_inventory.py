@@ -2269,8 +2269,8 @@ def handle_command(text, user, chat_id):
             pass
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
-    # Kreator resetu musi mieć pierwszeństwo przed starym USER_STATE i zwykłymi komendami.
-    # To naprawia zatrzymanie po wpisaniu "oczekujące" w kroku 5/6.
+    # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
+    # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
     reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
     if reset_wizard_reply:
         return reset_wizard_reply
@@ -2794,6 +2794,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
