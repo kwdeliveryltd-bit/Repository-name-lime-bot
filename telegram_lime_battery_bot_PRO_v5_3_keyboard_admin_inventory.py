@@ -1809,7 +1809,7 @@ def main():
 
     if not ADMIN_IDS:
         print("UWAGA: ADMIN_IDS jest puste. Komendy admina będą zablokowane.")
-        print("Najpierw wpisz w kodzie swoje Telegram ID, np. ADMIN_IDS = {'123456789'}")
+        print("Najpierw wpisz w kodzie swoje Telegram ID, np. ADMIN_IDS = {'6030936882'}")
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
