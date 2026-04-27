@@ -898,11 +898,22 @@ def handle_driver_flow(text, user, chat_id):
         return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
 
     qty = number_from_text(text)
-    if qty is None:
-        return "Wpisz liczbę albo wpisz: anuluj"
 
-    if qty < 0:
-        return "Liczba nie może być ujemna."
+    # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
+    # "koniec", "dobieram X", "zatwierdz" nie mogą być blokowane przez brak liczby.
+    numeric_steps = {
+        ("pickup", "ready"),
+        ("pickup", "charging"),
+        ("pickup", "waiting"),
+        ("pickup", "take_qty"),
+        ("return_auto", "returned_qty"),
+    }
+
+    if (flow.get("type"), flow.get("step")) in numeric_steps:
+        if qty is None:
+            return "Wpisz liczbę albo wpisz: anuluj"
+        if qty < 0:
+            return "Liczba nie może być ujemna."
 
     # FLOW: pobranie baterii — prosty i odporny kreator
     if flow.get("type") == "pickup":
@@ -2258,14 +2269,13 @@ def handle_command(text, user, chat_id):
             pass
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
-    # RESET admina zawsze zaczyna kreator od nowa.
-    if is_admin(user):
-        admin_reset_reply = reset_all_command(text)
-        if admin_reset_reply:
-            USER_STATE.pop(user_id, None)
-            return setup_wizard_start(user_id)
+    # Kreator resetu musi mieć pierwszeństwo przed starym USER_STATE i zwykłymi komendami.
+    # To naprawia zatrzymanie po wpisaniu "oczekujące" w kroku 5/6.
+    reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
+    if reset_wizard_reply:
+        return reset_wizard_reply
 
-    # Jeśli kreator po resecie jest aktywny, ma pierwszeństwo.
+    # Jeśli stary kreator po resecie jest aktywny, obsłuż go dopiero po reset_wizard.
     setup_reply = setup_wizard_handle(text, user_id, chat_id)
     if setup_reply:
         if not is_admin(user):
@@ -2292,10 +2302,6 @@ def handle_command(text, user, chat_id):
                 "trasa Adam 100 start 07:39\n"
                 "Adam zabrane 100 start 07:39"
             )
-
-    reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
-    if reset_wizard_reply:
-        return reset_wizard_reply
 
     flow_reply = handle_driver_flow(text, user, chat_id)
     if flow_reply:
@@ -2678,10 +2684,10 @@ async def driver_alerts(app: Application):
                         await app.bot.send_message(
                             chat_id=chat_id,
                             text=(
-                                f"⏰ ZEGAREK KIEROWCY\\n"
-                                f"🚗 {driver}\\n"
-                                f"🔋 W trasie: {qty} baterii\\n"
-                                f"Zostało około: {left_minutes} min\\n"
+                                f"⏰ ZEGAREK KIEROWCY\n"
+                                f"🚗 {driver}\n"
+                                f"🔋 W trasie: {qty} baterii\n"
+                                f"Zostało około: {left_minutes} min\n"
                                 f"Deadline: {fmt_dt(deadline)}"
                             )
                         )
@@ -2692,10 +2698,10 @@ async def driver_alerts(app: Application):
                         await app.bot.send_message(
                             chat_id=chat_id,
                             text=(
-                                f"🚨 ZA 15 MIN KONIEC CZASU\\n"
-                                f"🚗 {driver}\\n"
-                                f"🔋 W trasie: {qty} baterii\\n"
-                                f"Zostało: {left_minutes} min\\n"
+                                f"🚨 ZA 15 MIN KONIEC CZASU\n"
+                                f"🚗 {driver}\n"
+                                f"🔋 W trasie: {qty} baterii\n"
+                                f"Zostało: {left_minutes} min\n"
                                 f"Deadline: {fmt_dt(deadline)}"
                             )
                         )
@@ -2707,10 +2713,10 @@ async def driver_alerts(app: Application):
                         await app.bot.send_message(
                             chat_id=chat_id,
                             text=(
-                                f"❌ SKOŃCZYŁ CI SIĘ CZAS\\n"
-                                f"🚗 Kierowca: {driver}\\n"
-                                f"🔋 Baterie w trasie: {qty}\\n"
-                                f"Deadline był o: {fmt_dt(deadline)}\\n"
+                                f"❌ SKOŃCZYŁ CI SIĘ CZAS\n"
+                                f"🚗 Kierowca: {driver}\n"
+                                f"🔋 Baterie w trasie: {qty}\n"
+                                f"Deadline był o: {fmt_dt(deadline)}\n"
                                 f"Spóźnienie: {late // 60}h {late % 60}min"
                             )
                         )
@@ -2726,9 +2732,9 @@ async def driver_alerts(app: Application):
                             await app.bot.send_message(
                                 chat_id=chat_id,
                                 text=(
-                                    f"🚨 NADAL PO CZASIE\\n"
-                                    f"🚗 Kierowca: {driver}\\n"
-                                    f"🔋 Baterie w trasie: {qty}\\n"
+                                    f"🚨 NADAL PO CZASIE\n"
+                                    f"🚗 Kierowca: {driver}\n"
+                                    f"🔋 Baterie w trasie: {qty}\n"
                                     f"Spóźnienie: {late // 60}h {late % 60}min"
                                 )
                             )
@@ -2788,4 +2794,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
