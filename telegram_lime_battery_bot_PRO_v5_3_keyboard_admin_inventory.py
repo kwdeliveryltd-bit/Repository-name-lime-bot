@@ -27,6 +27,26 @@ FILE_LOCK = threading.RLock()
 # UWAGA: pusta lista oznacza BRAK administratorów.
 ADMIN_IDS = {"6030936882"}
 
+# GŁÓWNA LISTA KIEROWCÓW: numer -> Telegram ID + nazwa.
+# Numery z pustym ID są wolne i nie będą używane do tras.
+DRIVER_BY_NUMBER = {
+    "1": {"id": "8635659517", "name": "Luke"},
+    "2": {"id": "6651434498", "name": "Michał S"},
+    "3": {"id": "7247279842", "name": "Michał P"},
+    "4": {"id": "8006256107", "name": "Piter"},
+    "5": {"id": "6921903873", "name": "Paweł LEGIA"},
+    "6": {"id": "", "name": "WOLNY"},
+    "7": {"id": "8226089815", "name": "Waldek"},
+    "8": {"id": "8087250524", "name": "Alex"},
+    "9": {"id": "7733740199", "name": "Paulina"},
+    "10": {"id": "1051855484", "name": "Krzysztof"},
+    "11": {"id": "8220348868", "name": "Paweł J"},
+    "12": {"id": "", "name": "WOLNY"},
+    "13": {"id": "6030936882", "name": "Kris"},
+    "14": {"id": "7794225975", "name": "Martinez"},
+}
+
+
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
 # Format:
@@ -345,11 +365,24 @@ def add_driver_id_command(text):
 
 def driver_search(query):
     """
-    Szuka kierowców po kodzie, jednej literze, imieniu, nazwisku, aliasie albo username.
+    Szuka kierowców po numerze, kodzie, imieniu, nazwisku, aliasie albo username.
+    Numer kierowcy ma pierwszeństwo i wskazuje konkretny Telegram ID z DRIVER_BY_NUMBER.
     """
     q = normalize_text(query).strip().lstrip("@")
     if not q:
         return []
+
+    if q in DRIVER_BY_NUMBER:
+        item = DRIVER_BY_NUMBER[q]
+        uid = str(item.get("id", "")).strip()
+        if not uid:
+            return []
+        return [{
+            "user_id": uid,
+            "name": item.get("name") or q,
+            "username": "",
+            "code": q,
+        }]
 
     results = []
     drivers = load_drivers()
@@ -389,7 +422,7 @@ def driver_search(query):
                 or uid
             )
             results.append({
-                "user_id": str(uid),
+                "user_id": str(info.get("id") or uid),
                 "name": display_name,
                 "username": info.get("username", ""),
                 "code": info.get("code", "")
@@ -1724,6 +1757,49 @@ def parse_wizard_time(text):
     return now().replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def reset_wizard_preview(wiz):
+    depot = int(wiz.get("depot_total", 0))
+    ready = int(wiz.get("ready", 0))
+    waiting = int(wiz.get("waiting", 0))
+    charging = int(wiz.get("charging", 0))
+    transit = sum(int(x.get("qty", 0)) for x in wiz.get("trips", []))
+    counted = ready + waiting + charging + transit
+    diff = depot - counted
+
+    lines = [
+        "📝 RESET — PODGLĄD, JESZCZE NIE ZATWIERDZONE",
+        "",
+        f"🏢 Depo total: {depot}",
+        f"📦 Gotowe: {ready}",
+        f"⏳ Oczekujące: {waiting}",
+        f"🔌 W ładowarkach: {charging}",
+        f"🚗 W trasie do zapisania: {transit}",
+    ]
+
+    if wiz.get("trips"):
+        lines.append("")
+        lines.append("Trasy czekające na zatwierdzenie:")
+        for trip in wiz.get("trips", []):
+            try:
+                start_dt = datetime.fromisoformat(trip["start"])
+                start_txt = fmt_dt(start_dt)
+            except Exception:
+                start_txt = str(trip.get("start", "?"))
+            lines.append(f"• {trip.get('driver', 'Nieznany')}: {trip.get('qty', 0)} baterii, start {start_txt}")
+
+    lines += ["", f"🧮 Razem po zatwierdzeniu: {counted}"]
+    if diff > 0:
+        lines.append(f"⚠️ Brakuje do depo: {diff}")
+    elif diff < 0:
+        lines.append(f"🚨 Nadwyżka ponad depo: {abs(diff)}")
+    else:
+        lines.append("✅ Zgadza się z depo")
+
+    lines.append("")
+    lines.append("Wpisz: zatwierdz — dopiero wtedy zapiszę stan na stałe.")
+    return "\n".join(lines)
+
+
 def handle_reset_wizard(text, user, chat_id):
     data = load_reset_wizard()
     key = str(user.id)
@@ -1900,6 +1976,9 @@ def handle_reset_wizard(text, user, chat_id):
         )
 
     if step == "trips":
+        if t in ["status", "stan", "podglad", "podgląd"]:
+            return reset_wizard_preview(wiz)
+
         if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
             return driver_numbers_text()
 
@@ -1935,13 +2014,11 @@ def handle_reset_wizard(text, user, chat_id):
             start_dt = datetime.fromisoformat(pending["start"])
 
             return (
-                f"✅ Dodano trasę:\n"
-                f"{selected['name']}: {pending['qty']} baterii, start {fmt_dt(start_dt)}\n"
-                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
-                f"Razem w trasie z resetu: {total_routes}\n\n"
-                "Dodaj następną trasę, np.:\n"
-                "p 55 start 14:52\n"
-                "albo wpisz: zatwierdz"
+                f"✅ Dodano do listy resetu — jeszcze NIE zapisano na stałe.\n\n"
+                f"🚗 {selected['name']}: {pending['qty']} baterii, start {fmt_dt(start_dt)}\n"
+                f"Telegram ID: {selected['user_id']}\n\n"
+                f"Razem w trasie do zatwierdzenia: {total_routes}\n\n"
+                "Dodaj następną trasę albo wpisz: zatwierdz"
             )
 
         patterns = [
@@ -2000,10 +2077,10 @@ def handle_reset_wizard(text, user, chat_id):
             total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
 
             return (
-                f"✅ Dodano trasę:\n"
-                f"{selected['name']}: {qty} baterii, start {fmt_dt(dt)}\n"
-                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
-                f"Razem w trasie z resetu: {total_routes}\n\n"
+                f"✅ Dodano do listy resetu — jeszcze NIE zapisano na stałe.\n\n"
+                f"🚗 {selected['name']}: {qty} baterii, start {fmt_dt(dt)}\n"
+                f"Telegram ID: {selected['user_id']}\n\n"
+                f"Razem w trasie do zatwierdzenia: {total_routes}\n\n"
                 "Dodaj następną trasę albo wpisz: zatwierdz"
             )
 
@@ -2724,26 +2801,21 @@ def charging_status():
 
 
 def driver_numbers_text():
-    lines = [
-        "🔢 NUMERY KIEROWCÓW",
-        "",
-        "1 — Luke Dobosz Od Petera",
-        "2 — Michal Od Kasi Kosmet Londyn",
-        "3 — Michal Kierowca Od Dobosza",
-        "4 — Piter",
-        "5 — Pawel Drewni Movano",
-        "7 — Waldek Nw Lima Kierowca",
-        "8 — Alex Puchalski Lima",
-        "9 — Paulinka Moja Księżniczka",
-        "10 — Krzysztof Kierowca Tomasz Pie",
-        "11 — Pawel Hanslow Lima",
-        "12 — Paulinka Moja Księżniczka",
-        "13 — Kris",
-        "14 — Martinez Kierowca Mitcham Na Lima",
+    lines = ["🔢 KIEROWCY — LEGENDA", ""]
+
+    for num in sorted(DRIVER_BY_NUMBER.keys(), key=lambda x: int(x)):
+        item = DRIVER_BY_NUMBER[num]
+        uid = item.get("id") or "brak ID"
+        name = item.get("name") or "Brak"
+        lines.append(f"{num} — {name} — ID: {uid}")
+
+    lines += [
         "",
         "Format trasy:",
         "1 50 start 12:00",
-        "14 60 start 16:40"
+        "3 70 start 18:00",
+        "",
+        "W resecie trasy czekają na komendę: zatwierdz"
     ]
     return "\n".join(lines)
 
