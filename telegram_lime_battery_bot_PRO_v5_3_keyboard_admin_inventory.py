@@ -23,9 +23,9 @@ DRIVERS_FILE = "telegram_drivers.json"
 FILE_LOCK = threading.RLock()
 
 # Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
-# Przykład: ADMIN_IDS = {"123456789"}
+# Przykład: ADMIN_IDS = {"6030936882"}
 # UWAGA: pusta lista oznacza BRAK administratorów.
-ADMIN_IDS = {"6030936882"}
+ADMIN_IDS = {"123456789"}
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -38,7 +38,49 @@ ADMIN_IDS = {"6030936882"}
 # Możesz też dodawać ich z Telegrama komendą:
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
-DRIVER_ID_BOOK = {}
+DRIVER_ID_BOOK = {
+    # Dodani ręcznie na stałe — bot będzie ich znał nawet po resecie plików JSON.
+    "l": {
+        "id": "8635659517",
+        "name": "Luke Dobosz",
+        "aliases": ["l", "luk", "luke", "luke dobosz"]
+    },
+    "k": {
+        "id": "1051855484",
+        "name": "Krzysztof",
+        "aliases": ["k", "kris", "krzysztof"]
+    },
+    "a": {
+        "id": "8768227091",
+        "name": "Adam Od Dobosza Lima",
+        "aliases": ["a", "adam", "adam od dobosza", "adam lima"]
+    },
+    "p": {
+        "id": "8220348868",
+        "name": "Pawel Hanslow Lima",
+        "aliases": ["p", "paw", "pawel", "paweł", "pawel hanslow", "paweł hanslow", "pawel lima"]
+    },
+    "w": {
+        "id": "8226089815",
+        "name": "Waldek NW Lima Kierowca",
+        "aliases": ["w", "wal", "waldek", "waldek nw", "waldek lima"]
+    },
+    "pi": {
+        "id": "8006256107",
+        "name": "Piter",
+        "aliases": ["pi", "pit", "piter"]
+    },
+    "pd": {
+        "id": "6921903873",
+        "name": "Pawel Drewni Moyano",
+        "aliases": ["pd", "drewni", "pawel drewni", "paweł drewni", "moyano"]
+    },
+    "al": {
+        "id": "8087250524",
+        "name": "Alex Puchalski Lima",
+        "aliases": ["al", "alex", "alex puchalski"]
+    },
+}
 
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
