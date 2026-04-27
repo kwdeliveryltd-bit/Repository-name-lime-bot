@@ -2918,7 +2918,9 @@ def handle_command(text, user, chat_id):
         if admin_restore_trip_reply:
             return admin_restore_trip_reply
 
-        if "start" in t:
+        # Nie blokuj standardowych komend pomocy/start dla admina.
+        # Wcześniej /start zawierało tekst "start" i wpadało w komunikat błędu.
+        if "start" in t and t not in ["start", "/start", "pomoc", "/pomoc", "help", "/help"]:
             return (
                 "❌ Nie rozumiem tej komendy ze startem.\n\n"
                 "Użyj np.:\n"
