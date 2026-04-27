@@ -23,6 +23,19 @@ DRIVERS_FILE = "telegram_drivers.json"
 # Przykład: ADMIN_IDS = {"123456789"}
 ADMIN_IDS = set()
 
+# RĘCZNA KSIĄŻKA KIEROWCÓW
+# Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
+# Format:
+# DRIVER_ID_BOOK = {
+#     "a": {"id": "123456789", "name": "Adam Od Dobosza Lima", "aliases": ["adam", "adam od dobosza"]},
+#     "paulina": {"id": "987654321", "name": "Paulinka Moja Księżniczka", "aliases": ["paulina", "paulinka"]},
+# }
+#
+# Możesz też dodawać ich z Telegrama komendą:
+# dodaj id a 123456789 Adam Od Dobosza Lima
+# dodaj id paulina 987654321 Paulinka Moja Księżniczka
+DRIVER_ID_BOOK = {}
+
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
 
@@ -113,8 +126,39 @@ def load_group():
 def save_group(chat_id):
     save_json(GROUP_FILE, {"chat_id": chat_id})
 
+
 def load_drivers():
-    return load_json(DRIVERS_FILE, {})
+    """
+    Zwraca zapisanych kierowców:
+    - automatycznie zapamiętanych przez bota,
+    - ręcznie wpisanych w DRIVER_ID_BOOK w kodzie.
+    """
+    data = load_json(DRIVERS_FILE, {})
+
+    # Dorzuć ręczną książkę kierowców z kodu.
+    for code, item in DRIVER_ID_BOOK.items():
+        uid = str(item.get("id", "")).strip()
+        if not uid or uid.upper().startswith("WPISZ"):
+            continue
+
+        name = item.get("name") or str(code)
+        aliases = item.get("aliases", [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+
+        existing = data.get(uid, {})
+        data[uid] = {
+            "id": uid,
+            "name": existing.get("name") or name,
+            "first_name": existing.get("first_name") or name.split()[0],
+            "full_name": existing.get("full_name") or name,
+            "username": existing.get("username") or "",
+            "code": existing.get("code") or str(code),
+            "aliases": sorted(set((existing.get("aliases") or []) + aliases + [str(code), name])),
+            "manual_book": True
+        }
+
+    return data
 
 
 def save_drivers(data):
@@ -124,31 +168,89 @@ def save_drivers(data):
 def remember_driver(user):
     """
     Zapamiętuje osobę, która napisała do bota.
-    Dzięki temu admin przy resecie może wpisać np.:
-    p 55 start 14:52
-    a bot pokaże pasujących kierowców i zapisze trasę na prawdziwe Telegram ID.
     """
     if not user:
         return
 
-    data = load_drivers()
+    data = load_json(DRIVERS_FILE, {})
     uid = str(user.id)
+    old = data.get(uid, {})
+
+    aliases = old.get("aliases") or []
+    name = get_driver_name(user)
+    for x in [name, user.first_name or "", user.full_name or "", user.username or ""]:
+        if x and x not in aliases:
+            aliases.append(x)
 
     data[uid] = {
         "id": uid,
-        "name": get_driver_name(user),
-        "first_name": user.first_name or "",
-        "full_name": user.full_name or "",
-        "username": user.username or ""
+        "name": old.get("name") or name,
+        "first_name": user.first_name or old.get("first_name", ""),
+        "full_name": user.full_name or old.get("full_name", ""),
+        "username": user.username or old.get("username", ""),
+        "code": old.get("code", ""),
+        "aliases": aliases,
+        "manual_book": old.get("manual_book", False)
     }
 
     save_drivers(data)
 
 
+def add_driver_id_command(text):
+    """
+    Admin może dodać kierowcę bez reply, po zebraniu Telegram ID.
+
+    Format:
+    dodaj id a 123456789 Adam Od Dobosza Lima
+    dodaj kierowce a 123456789 Adam Od Dobosza Lima
+    """
+    raw = text.strip()
+    m = re.search(
+        r"^(?:dodaj\s+id|dodaj\s+kierowce|dodaj\s+kierowcę|zapisz\s+kierowce|zapisz\s+kierowcę)\s+(\S+)\s+(\d{4,})\s+(.+?)\s*$",
+        raw,
+        re.IGNORECASE
+    )
+    if not m:
+        return None
+
+    code = m.group(1).strip()
+    uid = m.group(2).strip()
+    name = m.group(3).strip()
+
+    data = load_json(DRIVERS_FILE, {})
+    old = data.get(uid, {})
+    aliases = old.get("aliases") or []
+
+    for x in [code, name, name.split()[0] if name.split() else ""]:
+        if x and x not in aliases:
+            aliases.append(x)
+
+    data[uid] = {
+        "id": uid,
+        "name": name,
+        "first_name": name.split()[0] if name.split() else name,
+        "full_name": name,
+        "username": old.get("username", ""),
+        "code": code,
+        "aliases": aliases,
+        "manual_added": True
+    }
+    save_drivers(data)
+
+    return (
+        "✅ Kierowca dodany ręcznie\n\n"
+        f"Kod: {code}\n"
+        f"Nazwa: {name}\n"
+        f"Telegram ID: {uid}\n\n"
+        "Od teraz możesz użyć np.:\n"
+        f"{code} 55 start 14:52\n"
+        f"{name} 55 start 14:52"
+    )
+
+
 def driver_search(query):
     """
-    Szuka kierowców po fragmencie imienia, nazwiska albo username.
-    Zwraca listę pasujących osób z prawdziwym Telegram ID.
+    Szuka kierowców po kodzie, jednej literze, imieniu, nazwisku, aliasie albo username.
     """
     q = normalize_text(query).strip().lstrip("@")
     if not q:
@@ -158,17 +260,27 @@ def driver_search(query):
     drivers = load_drivers()
 
     for uid, info in drivers.items():
+        aliases = info.get("aliases") or []
         candidates = [
+            info.get("code", ""),
             info.get("name", ""),
             info.get("first_name", ""),
             info.get("full_name", ""),
             info.get("username", ""),
+            *aliases,
         ]
 
-        normalized_candidates = [normalize_text(x).strip().lstrip("@") for x in candidates if x]
+        normalized_candidates = [normalize_text(str(x)).strip().lstrip("@") for x in candidates if x]
         searchable = " ".join(normalized_candidates)
 
-        if any(c.startswith(q) for c in normalized_candidates) or q in searchable:
+        # 1 litera ma działać jako kod lub początek imienia/nazwy.
+        matched = (
+            any(c == q for c in normalized_candidates)
+            or any(c.startswith(q) for c in normalized_candidates)
+            or q in searchable
+        )
+
+        if matched:
             display_name = (
                 info.get("name")
                 or info.get("full_name")
@@ -177,12 +289,12 @@ def driver_search(query):
                 or uid
             )
             results.append({
-                "user_id": uid,
+                "user_id": str(uid),
                 "name": display_name,
-                "username": info.get("username", "")
+                "username": info.get("username", ""),
+                "code": info.get("code", "")
             })
 
-    # Usuń duplikaty i sortuj stabilnie po nazwie
     unique = {}
     for item in results:
         unique[item["user_id"]] = item
@@ -196,16 +308,92 @@ def drivers_list_text():
         return (
             "👥 KIEROWCY\n\n"
             "Brak zapisanych kierowców.\n\n"
-            "Każdy kierowca musi napisać cokolwiek do bota, np. Pomoc, "
-            "żeby bot zapamiętał jego Telegram ID."
+            "Dodaj ich ręcznie, gdy zbierzesz Telegram ID:\n"
+            "dodaj id a 123456789 Adam Od Dobosza Lima\n"
+            "dodaj id paulina 987654321 Paulinka Moja Księżniczka"
         )
 
     lines = ["👥 ZAPISANI KIEROWCY", ""]
     for item in sorted(drivers.values(), key=lambda x: normalize_text(x.get("name", ""))):
         username = f" @{item.get('username')}" if item.get("username") else ""
-        lines.append(f"• {item.get('name') or item.get('id')}{username} — ID: {item.get('id')}")
+        code = f" [{item.get('code')}]" if item.get("code") else ""
+        aliases = item.get("aliases") or []
+        alias_txt = f" | aliasy: {', '.join(aliases[:5])}" if aliases else ""
+        lines.append(f"•{code} {item.get('name') or item.get('id')}{username} — ID: {item.get('id')}{alias_txt}")
 
     return "\n".join(lines)
+
+
+def create_restored_trip(driver_name, user_id, chat_id, start_time, qty, manual=False):
+    db = load_db()
+    wanted = normalize_text(driver_name)
+
+    db["trips"] = [
+        trip for trip in db["trips"]
+        if not (
+            trip.get("end") is None
+            and (
+                str(trip.get("user_id", "")) == str(user_id)
+                or normalize_text(trip.get("driver", "")) == wanted
+                or wanted in normalize_text(trip.get("driver", ""))
+                or normalize_text(trip.get("driver", "")) in wanted
+            )
+        )
+    ]
+
+    db["trips"].append({
+        "driver": driver_name,
+        "user_id": str(user_id),
+        "chat_id": chat_id,
+        "start": start_time.isoformat(),
+        "qty": int(qty),
+        "end": None,
+        "alert_sent": False,
+        "manual": manual,
+        "restored": True
+    })
+
+    save_db(db)
+    deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+
+    return (
+        f"✅ ODTWORZONO TRASĘ\n\n"
+        f"🚗 {driver_name}: {qty} baterii\n"
+        f"Telegram ID: {user_id}\n"
+        f"Start: {fmt_dt(start_time)}\n"
+        f"Deadline: {fmt_dt(deadline)}\n"
+        f"📌 Gotowe NIE zostały pomniejszone.\n\n"
+        f"{status_report()}"
+    )
+
+
+def handle_restore_driver_choice(text, user, chat_id):
+    key = str(user.id)
+    state = USER_STATE.get(key)
+
+    if not state or state.get("action") != "choose_restore_driver":
+        return None
+
+    if not only_number(text):
+        return "Wpisz numer kierowcy z listy albo wpisz: anuluj"
+
+    idx = int(text.strip()) - 1
+    matches = state.get("matches", [])
+
+    if idx < 0 or idx >= len(matches):
+        return f"❌ Wybierz numer od 1 do {len(matches)}."
+
+    selected = matches[idx]
+    USER_STATE.pop(key, None)
+
+    return create_restored_trip(
+        selected["name"],
+        selected["user_id"],
+        chat_id,
+        datetime.fromisoformat(state["start"]),
+        int(state["qty"]),
+        manual=True
+    )
 
 
 def load_driver_checks():
@@ -439,23 +627,21 @@ def parse_time_today(time_text):
     return now().replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
 
 
+
 def restore_trip_command(text, chat_id, chooser_user_id=None):
     """
-    Odtwarza aktywną trasę po resecie albo ręcznie poza kreatorem.
+    Odtwarza aktywną trasę po resecie, ale najpierw próbuje przypisać ją
+    do prawdziwego Telegram ID kierowcy z książki kierowców.
 
-    Obsługiwane formaty:
+    Działa też z krótkim formatem:
+    a 59 start10:23
+    a 59 start 10:23
     trasa Adam 100 start 07:39
-    Adam zabrane 100 start 07:39
-    Adam 100 start 07:39
-
-    WAŻNE:
-    Funkcja próbuje przypisać trasę do prawdziwego Telegram ID kierowcy
-    z pliku telegram_drivers.json. Jeśli znajdzie kilka osób, admin wybiera numer.
     """
     raw = text.strip()
 
     match = re.search(
-        r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+        r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s*(\d{1,2}[:.]\d{2})\s*$",
         raw,
         re.IGNORECASE
     )
@@ -475,96 +661,45 @@ def restore_trip_command(text, chat_id, chooser_user_id=None):
     if not matches:
         return (
             f"❌ Nie znalazłem kierowcy dla: {driver_query}\n\n"
-            "Kierowca musi najpierw zostać zapisany.\n\n"
-            "Najprościej w grupie:\n"
-            "1. Kierowca pisze np. Cześć.\n"
-            "2. Admin klika Odpowiedz na tę wiadomość.\n"
-            "3. Admin pisze: dodaj kierowce\n\n"
-            "Potem wpisz trasę jeszcze raz, np.:\n"
-            f"{driver_query} {qty} start {fmt_dt(start_time)}"
+            "Dodaj go ręcznie po Telegram ID, np.:\n"
+            "dodaj id a 123456789 Adam Od Dobosza Lima\n"
+            "dodaj id paulina 987654321 Paulinka Moja Księżniczka\n\n"
+            "Kierowca może sprawdzić ID komendą: moj id"
         )
 
-    if len(matches) > 1:
-        if chooser_user_id is None:
-            return (
-                f"🔎 Znalazłem kilku kierowców dla: {driver_query}\n\n"
-                + "\n".join(f"{i}. {item['name']}" for i, item in enumerate(matches, start=1))
-                + "\n\nNie mogę zapisać wyboru, bo brakuje ID admina w funkcji."
-            )
-
-        USER_STATE[str(chooser_user_id)] = {
-            "action": "choose_restore_driver",
-            "matches": matches,
-            "qty": qty,
-            "start": start_time.isoformat(),
-            "chat_id": chat_id,
-            "query": driver_query
-        }
-
-        return (
-            f"🔎 Znalazłem kilku kierowców dla: {driver_query}\n\n"
-            + "\n".join(f"{i}. {item['name']}" for i, item in enumerate(matches, start=1))
-            + "\n\nWpisz numer kierowcy."
+    if len(matches) == 1:
+        selected = matches[0]
+        return create_restored_trip(
+            selected["name"],
+            selected["user_id"],
+            chat_id,
+            start_time,
+            qty,
+            manual=True
         )
 
-    selected = matches[0]
-    return create_restored_trip(
-        driver=selected["name"],
-        user_id=selected["user_id"],
-        qty=qty,
-        start_time=start_time,
-        chat_id=chat_id
-    )
+    if chooser_user_id is None:
+        lines = [f"🔎 Znalazłem kilku kierowców dla: {driver_query}", ""]
+        for i, item in enumerate(matches, start=1):
+            code = f" [{item.get('code')}]" if item.get("code") else ""
+            lines.append(f"{i}. {item['name']}{code} — ID: {item['user_id']}")
+        lines += ["", "Wpisz pełniejszą nazwę albo użyj konkretnego kodu."]
+        return "\n".join(lines)
 
-
-def create_restored_trip(driver, user_id, qty, start_time, chat_id):
-    """
-    Wspólne dodawanie trasy odtworzonej z prawdziwym user_id kierowcy.
-    Magazyn nie jest pomniejszany.
-    """
-    qty = int(qty)
-    wanted = normalize_text(driver)
-
-    db = load_db()
-
-    db["trips"] = [
-        trip for trip in db["trips"]
-        if not (
-            trip.get("end") is None
-            and (
-                str(trip.get("user_id", "")) == str(user_id)
-                or normalize_text(trip.get("driver", "")) == wanted
-                or wanted in normalize_text(trip.get("driver", ""))
-                or normalize_text(trip.get("driver", "")) in wanted
-            )
-        )
-    ]
-
-    db["trips"].append({
-        "driver": driver,
-        "user_id": str(user_id),
-        "chat_id": chat_id,
-        "start": start_time.isoformat(),
+    USER_STATE[str(chooser_user_id)] = {
+        "action": "choose_restore_driver",
+        "matches": matches,
         "qty": qty,
-        "end": None,
-        "alert_sent": False,
-        "manual": True,
-        "restored": True
-    })
+        "start": start_time.isoformat(),
+    }
 
-    save_db(db)
+    lines = [f"🔎 Znalazłem kilku kierowców dla: {driver_query}", ""]
+    for i, item in enumerate(matches, start=1):
+        code = f" [{item.get('code')}]" if item.get("code") else ""
+        lines.append(f"{i}. {item['name']}{code} — ID: {item['user_id']}")
+    lines += ["", "Wpisz numer kierowcy, którego chcesz dodać."]
 
-    deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
-
-    return (
-        f"✅ ODTWORZONO TRASĘ\n\n"
-        f"🚗 {driver}: {qty} baterii\n"
-        f"Telegram ID: {user_id}\n"
-        f"Start: {fmt_dt(start_time)}\n"
-        f"Deadline: {fmt_dt(deadline)}\n"
-        f"📌 Gotowe NIE zostały pomniejszone.\n\n"
-        f"{status_report()}"
-    )
+    return "\n".join(lines)
 
 
 def restore_charging_command(text, chat_id):
@@ -579,7 +714,7 @@ def restore_charging_command(text, chat_id):
     t = normalize_text(raw)
 
     match = re.search(
-        r"^(?:ladowarki|ladowarka|ladowanie|wlozone)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+        r"^(?:ladowarki|ladowarka|ladowanie|wlozone)\s+(\d+)\s+start\s*(\d{1,2}[:.]\d{2})\s*$",
         t,
         re.IGNORECASE
     )
@@ -799,7 +934,7 @@ def setup_wizard_handle(text, user_id, chat_id):
         # Adam zabrane 100 start 07:39
         # Adam 100 start 07:39
         m = re.search(
-            r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s+(\d{1,2}[:.]\d{2})\s*$",
+            r"^(?:trasa\s+)?(.+?)\s+(?:(?:zabrane|w trasie)\s+)?(\d+)\s+start\s*(\d{1,2}[:.]\d{2})\s*$",
             raw,
             re.IGNORECASE
         )
@@ -1678,9 +1813,9 @@ def handle_reset_wizard(text, user, chat_id):
             )
 
         patterns = [
-            r"^trasa\s+(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
-            r"^(.+?)\s+zabrane\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
-            r"^(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
+            r"^trasa\s+(.+?)\s+(\d+)\s+start\s*(\d{1,2}[:.]\d{2})$",
+            r"^(.+?)\s+zabrane\s+(\d+)\s+start\s*(\d{1,2}[:.]\d{2})$",
+            r"^(.+?)\s+(\d+)\s+start\s*(\d{1,2}[:.]\d{2})$",
         ]
         m = None
         for p in patterns:
@@ -2553,29 +2688,6 @@ def handle_command(text, user, chat_id):
         state = USER_STATE.pop(user_id)
         action = state.get("action")
 
-        if action == "choose_restore_driver":
-            if not only_number(text):
-                USER_STATE[user_id] = state
-                return "Wpisz sam numer kierowcy z listy."
-
-            idx = int(text.strip()) - 1
-            matches = state.get("matches", [])
-
-            if idx < 0 or idx >= len(matches):
-                USER_STATE[user_id] = state
-                return f"❌ Wybierz numer od 1 do {len(matches)}."
-
-            selected = matches[idx]
-            start_time = datetime.fromisoformat(state["start"])
-
-            return create_restored_trip(
-                driver=selected["name"],
-                user_id=selected["user_id"],
-                qty=state["qty"],
-                start_time=start_time,
-                chat_id=state.get("chat_id") or chat_id
-            )
-
         if action in ["gotowe", "ladowarka", "oczekuja", "depo"]:
             if not only_number(text):
                 USER_STATE[user_id] = state
@@ -3103,4 +3215,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
