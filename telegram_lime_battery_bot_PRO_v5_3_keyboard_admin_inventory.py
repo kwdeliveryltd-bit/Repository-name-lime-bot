@@ -724,6 +724,81 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
 
 
 
+
+def charger_ready_to_remove():
+    """
+    Ile baterii z ładowarek faktycznie jest już gotowych do wyjęcia.
+    Liczymy tylko aktywne joby, których ready_at <= teraz.
+    """
+    current = now()
+    data = load_jobs()
+    total = 0
+
+    for job in data.get("jobs", []):
+        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
+            try:
+                ready_at = datetime.fromisoformat(job["ready_at"])
+                if current >= ready_at:
+                    total += int(job.get("qty", 0))
+            except Exception:
+                pass
+
+    inv = load_inventory()
+    charging = int(inv.get("charging", 0))
+    return min(total, charging)
+
+
+def remove_ready_from_chargers(qty):
+    """
+    Wyjmuje gotowe baterie z ładowarek:
+    - inventory charging -= qty
+    - inventory ready += qty
+    - zamyka lub zmniejsza odpowiednie joby ładowania
+    """
+    qty = int(qty)
+    if qty <= 0:
+        return 0
+
+    ready_available = charger_ready_to_remove()
+    qty = min(qty, ready_available)
+
+    inv = load_inventory()
+    inv["charging"] = max(0, int(inv.get("charging", 0)) - qty)
+    inv["ready"] = int(inv.get("ready", 0)) + qty
+    save_inventory(inv)
+
+    current = now()
+    left = qty
+    data = load_jobs()
+
+    for job in data.get("jobs", []):
+        if left <= 0:
+            break
+
+        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
+            try:
+                ready_at = datetime.fromisoformat(job["ready_at"])
+            except Exception:
+                continue
+
+            if current < ready_at:
+                continue
+
+            job_qty = int(job.get("qty", 0))
+            take = min(left, job_qty)
+
+            if take >= job_qty:
+                job["ready_sent"] = True
+                job["status"] = "done"
+            else:
+                job["qty"] = job_qty - take
+
+            left -= take
+
+    save_jobs(data)
+    return qty
+
+
 def charger_free_slots():
     inv = load_inventory()
     charging = int(inv.get("charging", 0))
@@ -780,12 +855,15 @@ def start_return_flow(user, chat_id, returned_qty=None):
     inv = load_inventory()
     charging = int(inv.get("charging", 0))
     waiting = int(inv.get("waiting", 0))
+    ready_to_remove = charger_ready_to_remove()
+
+    start_step = "taken_from_chargers" if ready_to_remove > 0 else "loaded_from_waiting"
 
     data = load_driver_flow()
     data[str(user.id)] = {
         "type": "return_control_v2",
         "chat_id": chat_id,
-        "step": "taken_from_chargers",
+        "step": start_step,
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
         "route_qty": route_qty,
@@ -799,12 +877,31 @@ def start_return_flow(user, chat_id, returned_qty=None):
     }
     save_driver_flow(data)
 
+    if ready_to_remove > 0:
+        return (
+            f"🔁 KONTROLA DEPO / ZWROTU\n\n"
+            f"Masz w trasie: {route_qty} baterii.\n"
+            f"🔌 Aktualnie w ładowarkach: {charging}\n"
+            f"✅ Gotowe do wyjęcia z ładowarek: {ready_to_remove}\n"
+            f"⏳ Oczekujące: {waiting}\n\n"
+            "1/6 Ile WYJĘTO gotowych baterii z ładowarek?\n"
+            f"Maksymalnie: {ready_to_remove}\n"
+            "Jeśli nic, wpisz 0."
+        )
+
+    free = charger_free_slots()
+    max_load = min(waiting, free)
+
     return (
         f"🔁 KONTROLA DEPO / ZWROTU\n\n"
         f"Masz w trasie: {route_qty} baterii.\n"
         f"🔌 Aktualnie w ładowarkach: {charging}\n"
+        f"✅ Gotowe do wyjęcia z ładowarek: 0\n"
         f"⏳ Oczekujące: {waiting}\n\n"
-        "1/6 Ile WYJĘTO gotowych baterii z ładowarek?\n"
+        "Pomijam wyjmowanie z ładowarek, bo żadna bateria nie jest jeszcze gotowa.\n\n"
+        f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+        f"Maksymalnie możesz dołożyć z oczekujących: {max_load}\n\n"
+        "2/6 Ile DOŁOŻONO z oczekujących do ładowarek?\n"
         "Jeśli nic, wpisz 0."
     )
 
@@ -985,26 +1082,37 @@ def handle_driver_flow(text, user, chat_id):
         inv = load_inventory()
 
         if flow["step"] == "taken_from_chargers":
-            charging = int(inv.get("charging", 0))
-            if qty > charging:
-                return f"❌ Nie możesz wyjąć {qty}, bo w ładowarkach jest tylko {charging}."
+            ready_available = charger_ready_to_remove()
 
-            inv["charging"] = charging - qty
-            inv["ready"] = int(inv.get("ready", 0)) + qty
-            save_inventory(inv)
+            if ready_available <= 0:
+                flow["taken_from_chargers"] = 0
+                flow["step"] = "loaded_from_waiting"
+                data[key] = flow
+                save_driver_flow(data)
+                return (
+                    "✅ Nie ma gotowych baterii do wyjęcia z ładowarek.\n"
+                    "Pomijam ten etap.\n\n"
+                    "Wpisz liczbę dołożonych z oczekujących do ładowarek."
+                )
 
-            flow["taken_from_chargers"] = qty
+            if qty > ready_available:
+                return f"❌ Nie możesz wyjąć {qty}, bo gotowych do wyjęcia jest tylko {ready_available}."
+
+            removed = remove_ready_from_chargers(qty)
+
+            flow["taken_from_chargers"] = removed
             flow["step"] = "loaded_from_waiting"
             data[key] = flow
             save_driver_flow(data)
 
+            inv = load_inventory()
             free = charger_free_slots()
             waiting = int(inv.get("waiting", 0))
             max_load = min(waiting, free)
 
             return (
-                f"✅ Wyjęto z ładowarek: {qty}\n"
-                f"Dodano do gotowych: {qty}\n\n"
+                f"✅ Wyjęto z ładowarek: {removed}\n"
+                f"Dodano do gotowych: {removed}\n\n"
                 f"🔌 Wolne miejsca w ładowarkach: {free}\n"
                 f"⏳ Oczekujące: {waiting}\n"
                 f"Maksymalnie możesz dołożyć z oczekujących: {max_load}\n\n"
@@ -1252,6 +1360,291 @@ def handle_driver_flow(text, user, chat_id):
             )
 
     return None
+
+
+
+RESET_WIZARD_FILE = "telegram_reset_wizard.json"
+
+
+def load_reset_wizard():
+    return load_json(RESET_WIZARD_FILE, {})
+
+
+def save_reset_wizard(data):
+    save_json(RESET_WIZARD_FILE, data)
+
+
+def clear_reset_wizard(user_id):
+    data = load_reset_wizard()
+    key = str(user_id)
+    if key in data:
+        del data[key]
+        save_reset_wizard(data)
+
+
+def start_reset_wizard(user, chat_id):
+    save_db({"trips": []})
+    save_inventory({
+        "depot_total": 0,
+        "ready": 0,
+        "waiting": 0,
+        "charging": 0,
+        "updated_at": None
+    })
+    save_jobs({"jobs": []})
+    save_driver_checks({})
+    try:
+        save_driver_flow({})
+    except Exception:
+        pass
+
+    data = load_reset_wizard()
+    data[str(user.id)] = {
+        "chat_id": chat_id,
+        "step": "depo",
+        "depot_total": 0,
+        "charging": 0,
+        "charge_start": None,
+        "ready": 0,
+        "waiting": 0,
+        "trips": []
+    }
+    save_reset_wizard(data)
+
+    return (
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "1/6 Podaj stan DEPO, np.:\n"
+        "504"
+    )
+
+
+def parse_wizard_time(text):
+    t = normalize_text(text).strip()
+    if t in ["teraz", "now"]:
+        return now()
+    m = re.search(r"(\d{1,2})[:.](\d{2})", text)
+    if not m:
+        return None
+    return now().replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+
+
+def handle_reset_wizard(text, user, chat_id):
+    data = load_reset_wizard()
+    key = str(user.id)
+    wiz = data.get(key)
+
+    if not wiz:
+        return None
+
+    if not is_admin(user):
+        return None
+
+    t = normalize_text(text).strip()
+
+    if t in ["anuluj", "cancel", "stop"]:
+        clear_reset_wizard(user.id)
+        return "❌ Reset wizard przerwany."
+
+    if t in ["zatwierdz", "zatwierdź", "ok", "koniec"]:
+        if wiz.get("step") != "trips":
+            return "Jeszcze nie skończyliśmy. Uzupełnij aktualny krok albo wpisz: anuluj"
+
+        inv = load_inventory()
+        inv["depot_total"] = int(wiz.get("depot_total", 0))
+        inv["ready"] = int(wiz.get("ready", 0))
+        inv["waiting"] = int(wiz.get("waiting", 0))
+        inv["charging"] = int(wiz.get("charging", 0))
+        save_inventory(inv)
+
+        charging = int(wiz.get("charging", 0))
+        charge_start_iso = wiz.get("charge_start")
+        if charging > 0 and charge_start_iso:
+            charge_start = datetime.fromisoformat(charge_start_iso)
+            ready_at = charge_start + timedelta(hours=CHARGE_TIME_HOURS)
+            alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
+            save_jobs({"jobs": [{
+                "id": 1,
+                "qty": charging,
+                "chat_id": chat_id,
+                "start_at": charge_start.isoformat(),
+                "ready_at": ready_at.isoformat(),
+                "alarm_at": alarm_at.isoformat(),
+                "alarm_sent": now() >= alarm_at,
+                "ready_sent": False,
+                "status": "alarm_sent" if now() >= alarm_at else "charging",
+                "manual": True,
+                "reset_wizard": True
+            }]})
+        else:
+            save_jobs({"jobs": []})
+
+        db = {"trips": []}
+        for trip in wiz.get("trips", []):
+            db["trips"].append({
+                "driver": trip["driver"],
+                "user_id": trip.get("user_id") or f"manual:{normalize_text(trip['driver'])}",
+                "chat_id": chat_id,
+                "start": trip["start"],
+                "qty": int(trip["qty"]),
+                "end": None,
+                "alert_sent": False,
+                "manual": True,
+                "reset_wizard": True
+            })
+        save_db(db)
+
+        clear_reset_wizard(user.id)
+
+        return (
+            "✅ RESET ZATWIERDZONY\n\n"
+            "Stany i trasy zapisane.\n\n"
+            f"{status_report()}\n\n"
+            "📢 Ważne: jeśli trasy dodałeś za kierowców ręcznie, kierowcy mogą nie zakończyć ich ze swoich kont.\n"
+            "Najbezpieczniej po resecie: każdy kierowca sam wpisuje Zabrane ze swojego Telegrama."
+        )
+
+    step = wiz.get("step")
+
+    if step == "depo":
+        qty = number_from_text(text)
+        if qty is None:
+            return "Podaj samą liczbę DEPO, np. 504"
+        wiz["depot_total"] = qty
+        wiz["step"] = "charging"
+        data[key] = wiz
+        save_reset_wizard(data)
+        return (
+            "✅ Depo zapisane.\n\n"
+            "2/6 Podaj ile jest W ŁADOWARKACH, np.:\n"
+            "133\n\n"
+            "Jeśli zero, wpisz: 0"
+        )
+
+    if step == "charging":
+        qty = number_from_text(text)
+        if qty is None:
+            return "Podaj samą liczbę baterii w ładowarkach, np. 133"
+        if qty < 0:
+            return "Liczba nie może być ujemna."
+        if qty > CHARGER_CAPACITY:
+            return f"❌ Ładowarki mają limit {CHARGER_CAPACITY}."
+        wiz["charging"] = qty
+        if qty == 0:
+            wiz["charge_start"] = None
+            wiz["step"] = "ready"
+            data[key] = wiz
+            save_reset_wizard(data)
+            return (
+                "✅ Ładowarki zapisane: 0\n\n"
+                "3/6 Podaj ile jest GOTOWYCH, np.:\n"
+                "77"
+            )
+
+        wiz["step"] = "charge_start"
+        data[key] = wiz
+        save_reset_wizard(data)
+        return (
+            "✅ Ładowarki zapisane.\n\n"
+            "3/6 Podaj START ładowania, np.:\n"
+            "06:30\n\n"
+            "Możesz też wpisać: teraz"
+        )
+
+    if step == "charge_start":
+        dt = parse_wizard_time(text)
+        if not dt:
+            return "Podaj godzinę startu ładowania, np. 06:30 albo wpisz: teraz"
+        wiz["charge_start"] = dt.isoformat()
+        wiz["step"] = "ready"
+        data[key] = wiz
+        save_reset_wizard(data)
+        return (
+            "✅ Start ładowania zapisany.\n\n"
+            "4/6 Podaj ile jest GOTOWYCH, np.:\n"
+            "77"
+        )
+
+    if step == "ready":
+        qty = number_from_text(text)
+        if qty is None:
+            return "Podaj samą liczbę gotowych, np. 77"
+        if qty < 0:
+            return "Liczba nie może być ujemna."
+        wiz["ready"] = qty
+        wiz["step"] = "waiting"
+        data[key] = wiz
+        save_reset_wizard(data)
+        return (
+            "✅ Gotowe zapisane.\n\n"
+            "5/6 Podaj ile jest OCZEKUJĄCYCH, np.:\n"
+            "275"
+        )
+
+    if step == "waiting":
+        qty = number_from_text(text)
+        if qty is None:
+            return "Podaj samą liczbę oczekujących, np. 275"
+        if qty < 0:
+            return "Liczba nie może być ujemna."
+        wiz["waiting"] = qty
+        wiz["step"] = "trips"
+        data[key] = wiz
+        save_reset_wizard(data)
+        return (
+            "✅ Oczekujące zapisane.\n\n"
+            "6/6 Dodaj trasy kierowców albo wpisz: zatwierdz\n\n"
+            "Formaty:\n"
+            "trasa Adam 100 start 07:39\n"
+            "Adam zabrane 100 start 07:39\n"
+            "Adam 100 start 07:39\n\n"
+            "Każdego kierowcę wpisz osobno."
+        )
+
+    if step == "trips":
+        patterns = [
+            r"^trasa\s+(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
+            r"^(.+?)\s+zabrane\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
+            r"^(.+?)\s+(\d+)\s+start\s+(\d{1,2}[:.]\d{2})$",
+        ]
+        m = None
+        for p in patterns:
+            m = re.search(p, text.strip(), re.IGNORECASE)
+            if m:
+                break
+
+        if not m:
+            return (
+                "Nie rozumiem trasy.\n\n"
+                "Użyj np.:\n"
+                "trasa Adam 100 start 07:39\n"
+                "albo wpisz: zatwierdz"
+            )
+
+        driver = m.group(1).strip()
+        qty = int(m.group(2))
+        dt = parse_wizard_time(m.group(3))
+        if qty < 1:
+            return "Trasa musi mieć minimum 1 baterię."
+
+        wiz.setdefault("trips", []).append({
+            "driver": driver,
+            "qty": qty,
+            "start": dt.isoformat()
+        })
+        data[key] = wiz
+        save_reset_wizard(data)
+
+        total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
+
+        return (
+            f"✅ Dodano trasę:\n"
+            f"{driver}: {qty} baterii, start {fmt_dt(dt)}\n\n"
+            f"Razem w trasie z resetu: {total_routes}\n\n"
+            "Dodaj następnego kierowcę albo wpisz: zatwierdz"
+        )
+
+    return "Błąd kreatora resetu. Wpisz: reset"
 
 
 def reset_all_command(text):
@@ -1978,6 +2371,18 @@ def handle_command(text, user, chat_id):
     user_id = str(user.id)
     responses = []
 
+    # RESET ma ZAWSZE pierwszeństwo, nawet gdy bot jest w środku formularza/wizarda.
+    if t in ["reset", "reset wszystko", "reset system"]:
+        if not is_admin(user):
+            return "❌ Reset jest tylko dla administratora."
+        USER_STATE.pop(user_id, None)
+        clear_driver_flow(user_id)
+        try:
+            clear_reset_wizard(user_id)
+        except Exception:
+            pass
+        return start_reset_wizard(user, chat_id)
+
     # RESET admina zawsze zaczyna kreator od nowa.
     if is_admin(user):
         admin_reset_reply = reset_all_command(text)
@@ -2012,6 +2417,10 @@ def handle_command(text, user, chat_id):
                 "trasa Adam 100 start 07:39\n"
                 "Adam zabrane 100 start 07:39"
             )
+
+    reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
+    if reset_wizard_reply:
+        return reset_wizard_reply
 
     flow_reply = handle_driver_flow(text, user, chat_id)
     if flow_reply:
@@ -2498,11 +2907,12 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v7.0 działa...")
+    print("Telegram Lime Battery Bot PRO v7.2 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
