@@ -35,6 +35,7 @@ MIN_RATE = 1.00
 CHARGE_TIME_HOURS = 4.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50
+CHARGER_CAPACITY = 133  # maksymalna liczba baterii w ładowarkach
 
 
 def now():
@@ -722,47 +723,89 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     )
 
 
+
+def charger_free_slots():
+    inv = load_inventory()
+    charging = int(inv.get("charging", 0))
+    return max(0, CHARGER_CAPACITY - charging)
+
+
+def add_charging_job_from_return(chat_id, qty):
+    qty = int(qty)
+    if qty <= 0:
+        return
+
+    start = now()
+    ready_at = start + timedelta(hours=CHARGE_TIME_HOURS)
+    alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
+
+    jobs_data = load_jobs()
+    jobs = jobs_data.setdefault("jobs", [])
+    jobs.append({
+        "id": len(jobs) + 1,
+        "qty": qty,
+        "chat_id": chat_id,
+        "start_at": start.isoformat(),
+        "ready_at": ready_at.isoformat(),
+        "alarm_at": alarm_at.isoformat(),
+        "alarm_sent": False,
+        "ready_sent": False,
+        "status": "charging",
+        "source": "return"
+    })
+    save_jobs(jobs_data)
+
+
 def start_return_flow(user, chat_id, returned_qty=None):
     """
-    Kierowca wraca na depo, więc oddaje CAŁĄ aktywną trasę.
-    Nie ma opcji "zostaje w trasie".
+    Kontrola zwrotu na depo — pełna kolejność magazynu:
+    1) ile wyjęto gotowych z ładowarek,
+    2) ile dołożono z oczekujących do ładowarek,
+    3) ile baterii kierowca oddaje teraz,
+    4) ile z oddanych idzie do ładowarek,
+    5) koniec trasy albo dobieram X.
 
-    Bot pyta:
-    - ile z całej trasy idzie do ładowarek
-    - ile idzie w oczekujące
-    - reszta automatycznie jest gotowa
+    Jeśli kierowca kończy trasę, reszta jego baterii z trasy staje się GOTOWA.
     """
     db = load_db()
     trip = active_trip(db, user.id)
 
     if not trip:
-        return "Brak aktywnej trasy do zamknięcia."
+        return "Brak aktywnej trasy do rozliczenia."
 
-    total_qty = int(trip.get("qty", 0))
-
-    if total_qty < 1:
+    route_qty = int(trip.get("qty", 0))
+    if route_qty < 1:
         return "Brak baterii w aktywnej trasie."
+
+    inv = load_inventory()
+    charging = int(inv.get("charging", 0))
+    waiting = int(inv.get("waiting", 0))
 
     data = load_driver_flow()
     data[str(user.id)] = {
-        "type": "return_full",
+        "type": "return_control_v2",
         "chat_id": chat_id,
-        "step": "to_charging",
+        "step": "taken_from_chargers",
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
-        "returned": total_qty,
+        "route_qty": route_qty,
+        "taken_from_chargers": 0,
+        "loaded_from_waiting": 0,
+        "returned": None,
         "to_charging": None,
         "to_waiting": None,
-        "ready_return": None
+        "take_extra": 0,
+        "next_action": None,
     }
     save_driver_flow(data)
 
     return (
-        f"🔁 KONTROLA ZWROTU\n\n"
-        f"Masz w trasie: {total_qty} baterii.\n"
-        f"Zakładam, że wróciłeś/wróciłaś na depo i oddajesz WSZYSTKIE.\n\n"
-        "1/3 Ile idzie DO ŁADOWAREK?\n"
-        "Jeśli żadna, wpisz 0."
+        f"🔁 KONTROLA DEPO / ZWROTU\n\n"
+        f"Masz w trasie: {route_qty} baterii.\n"
+        f"🔌 Aktualnie w ładowarkach: {charging}\n"
+        f"⏳ Oczekujące: {waiting}\n\n"
+        "1/6 Ile WYJĘTO gotowych baterii z ładowarek?\n"
+        "Jeśli nic, wpisz 0."
     )
 
 
@@ -936,113 +979,275 @@ def handle_driver_flow(text, user, chat_id):
                 f"{status_report()}"
             )
 
-    # FLOW: oddanie całej trasy po powrocie na depo
-    if flow.get("type") == "return_full":
-        returned = int(flow.get("returned", 0))
+    # FLOW: pełna kontrola depo / zwrotu
+    if flow.get("type") == "return_control_v2":
+        route_qty = int(flow.get("route_qty", 0))
+        inv = load_inventory()
 
-        if flow["step"] == "to_charging":
-            if qty > returned:
-                return f"❌ Do ładowarek nie może iść więcej niż masz w trasie ({returned})."
-            flow["to_charging"] = qty
-            flow["step"] = "to_waiting"
+        if flow["step"] == "taken_from_chargers":
+            charging = int(inv.get("charging", 0))
+            if qty > charging:
+                return f"❌ Nie możesz wyjąć {qty}, bo w ładowarkach jest tylko {charging}."
+
+            inv["charging"] = charging - qty
+            inv["ready"] = int(inv.get("ready", 0)) + qty
+            save_inventory(inv)
+
+            flow["taken_from_chargers"] = qty
+            flow["step"] = "loaded_from_waiting"
             data[key] = flow
             save_driver_flow(data)
-            left = returned - qty
+
+            free = charger_free_slots()
+            waiting = int(inv.get("waiting", 0))
+            max_load = min(waiting, free)
+
             return (
-                f"Zostało do rozdzielenia: {left}\n\n"
-                "2/3 Ile idzie w OCZEKUJĄCE?\n"
-                "Reszta automatycznie będzie GOTOWA.\n"
+                f"✅ Wyjęto z ładowarek: {qty}\n"
+                f"Dodano do gotowych: {qty}\n\n"
+                f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                f"⏳ Oczekujące: {waiting}\n"
+                f"Maksymalnie możesz dołożyć z oczekujących: {max_load}\n\n"
+                "2/6 Ile DOŁOŻONO z oczekujących do ładowarek?\n"
                 "Jeśli nic, wpisz 0."
             )
 
-        if flow["step"] == "to_waiting":
-            to_charging = int(flow.get("to_charging", 0))
-            left = returned - to_charging
-            if qty > left:
-                return f"❌ Oczekujące nie mogą być większe niż zostało ({left})."
+        if flow["step"] == "loaded_from_waiting":
+            free = charger_free_slots()
+            waiting = int(inv.get("waiting", 0))
+            max_load = min(waiting, free)
 
-            flow["to_waiting"] = qty
-            flow["ready_return"] = returned - to_charging - qty
-            flow["step"] = "confirm_return_full"
+            if qty > max_load:
+                return (
+                    f"❌ Nie możesz dołożyć {qty}.\n"
+                    f"Wolne miejsca: {free}\n"
+                    f"Oczekujące: {waiting}\n"
+                    f"Maksymalnie: {max_load}"
+                )
+
+            inv["waiting"] = waiting - qty
+            inv["charging"] = int(inv.get("charging", 0)) + qty
+            save_inventory(inv)
+
+            if qty > 0:
+                add_charging_job_from_return(chat_id, qty)
+
+            flow["loaded_from_waiting"] = qty
+            flow["step"] = "returned_qty"
             data[key] = flow
             save_driver_flow(data)
 
             return (
-                "✅ Podsumowanie zwrotu:\n\n"
-                f"Oddane razem: {returned}\n"
-                f"Do ładowarek: {flow['to_charging']}\n"
-                f"Oczekujące: {flow['to_waiting']}\n"
-                f"Gotowe: {flow['ready_return']}\n\n"
-                "Wpisz: zatwierdz\n"
-                "albo: anuluj"
+                f"✅ Dołożono z oczekujących do ładowarek: {qty}\n\n"
+                f"3/6 Ile baterii kierowca oddaje TERAZ na depo?\n"
+                f"Masz w trasie: {route_qty}\n"
+                "Minimum 1."
             )
 
-        if flow["step"] == "confirm_return_full":
+        if flow["step"] == "returned_qty":
+            if qty < 1:
+                return "🚨 Nie można oddać 0. Minimum to 1."
+            if qty > route_qty:
+                return f"❌ Nie możesz oddać {qty}, bo w trasie masz {route_qty}."
+
+            flow["returned"] = qty
+            flow["step"] = "to_charging"
+            data[key] = flow
+            save_driver_flow(data)
+
+            free = charger_free_slots()
+            max_to_charging = min(qty, free)
+            auto_waiting = qty - max_to_charging
+
+            if free <= 0:
+                flow["to_charging"] = 0
+                flow["to_waiting"] = qty
+                flow["step"] = "next_action"
+                data[key] = flow
+                save_driver_flow(data)
+
+                return (
+                    f"🔌 Ładowarki są PEŁNE.\n"
+                    f"Wolne miejsca: 0\n"
+                    f"Oddane {qty} idzie w OCZEKUJĄCE.\n\n"
+                    "5/6 Co dalej?\n"
+                    "Wpisz: koniec\n"
+                    "albo: dobieram X"
+                )
+
+            return (
+                f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                f"Oddajesz: {qty}\n"
+                f"Maksymalnie do ładowarek: {max_to_charging}\n"
+                f"Jeśli wpiszesz {max_to_charging}, oczekujące będzie: {auto_waiting}\n\n"
+                "4/6 Ile z oddanych wkładasz DO ŁADOWAREK?\n"
+                "Jeśli nic, wpisz 0."
+            )
+
+        if flow["step"] == "to_charging":
+            returned = int(flow.get("returned", 0))
+            free = charger_free_slots()
+            max_to_charging = min(returned, free)
+
+            if qty > max_to_charging:
+                return (
+                    f"❌ Za dużo do ładowarek.\n"
+                    f"Wolne miejsca: {free}\n"
+                    f"Oddane teraz: {returned}\n"
+                    f"Maksymalnie możesz włożyć: {max_to_charging}\n"
+                    f"Reszta pójdzie w oczekujące."
+                )
+
+            flow["to_charging"] = qty
+            flow["to_waiting"] = returned - qty
+            flow["step"] = "next_action"
+            data[key] = flow
+            save_driver_flow(data)
+
+            return (
+                "✅ Rozdzielenie zwrotu:\n\n"
+                f"Oddane teraz: {returned}\n"
+                f"Do ładowarek: {flow['to_charging']}\n"
+                f"Oczekujące: {flow['to_waiting']}\n"
+                f"Zostaje z trasy przed decyzją: {route_qty - returned}\n\n"
+                "5/6 Co dalej?\n"
+                "Wpisz: koniec\n"
+                "albo: dobieram X"
+            )
+
+        if flow["step"] == "next_action":
+            returned = int(flow.get("returned", 0))
+            remaining_after_return = route_qty - returned
+
+            if t in ["koniec", "zakoncz", "zakończ", "zamknij"]:
+                flow["next_action"] = "finish"
+                flow["take_extra"] = 0
+            else:
+                m = re.search(r"(?:dobieram|dobrac|dobierasz|biore|biorę|zabieram)\s+(\d+)", t)
+                if not m:
+                    return "Wpisz: koniec albo dobieram X"
+
+                extra = int(m.group(1))
+                if extra < 1:
+                    return "🚨 Dobranie musi być minimum 1."
+
+                ready = int(inv.get("ready", 0))
+                if extra > ready:
+                    return f"❌ Za mało gotowych do dobrania. Gotowe: {ready}, chcesz dobrać: {extra}"
+
+                flow["next_action"] = "take_extra"
+                flow["take_extra"] = extra
+
+            flow["step"] = "confirm_return_control"
+            data[key] = flow
+            save_driver_flow(data)
+
+            ready_from_remaining = remaining_after_return if flow["next_action"] == "finish" else 0
+            final_route = 0 if flow["next_action"] == "finish" else remaining_after_return + int(flow.get("take_extra", 0))
+
+            return (
+                "✅ PODSUMOWANIE KONTROLI:\n\n"
+                f"Wyjęte z ładowarek do gotowych: {flow.get('taken_from_chargers', 0)}\n"
+                f"Dołożone z oczekujących do ładowarek: {flow.get('loaded_from_waiting', 0)}\n"
+                f"Oddane teraz: {returned}\n"
+                f"Z oddanych do ładowarek: {flow.get('to_charging', 0)}\n"
+                f"Z oddanych do oczekujących: {flow.get('to_waiting', 0)}\n"
+                f"Reszta trasy jako gotowe: {ready_from_remaining}\n"
+                f"Dobrane: {flow.get('take_extra', 0)}\n"
+                f"Nowy stan w trasie: {final_route}\n\n"
+                "6/6 Wpisz: zatwierdz albo anuluj"
+            )
+
+        if flow["step"] == "confirm_return_control":
             if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
                 return "Wpisz: zatwierdz albo anuluj"
 
             db = load_db()
             trip = active_trip(db, user.id)
-
             if not trip:
                 clear_driver_flow(user.id)
-                return "Brak aktywnej trasy do zamknięcia."
+                return "Brak aktywnej trasy do rozliczenia."
 
             original_qty = int(trip.get("qty", 0))
             returned = int(flow.get("returned", 0))
+            to_charging = int(flow.get("to_charging", 0))
+            to_waiting = int(flow.get("to_waiting", 0))
+            take_extra = int(flow.get("take_extra", 0))
+            remaining_after_return = original_qty - returned
+            finish_route = flow.get("next_action") == "finish"
+            ready_from_remaining = remaining_after_return if finish_route else 0
+            final_route_qty = 0 if finish_route else remaining_after_return + take_extra
 
-            if returned != original_qty:
+            if returned > original_qty:
                 clear_driver_flow(user.id)
-                return "❌ Błąd stanu trasy. Zacznij zwrot od nowa."
+                return f"❌ Błąd: oddajesz więcej ({returned}) niż masz w trasie ({original_qty})."
 
-            end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
-            trip["end"] = end_time.isoformat()
-            trip["returned"] = returned
-            trip["charged_inside"] = int(flow.get("ready_return", 0))
-            trip["hours"] = hours
-            trip["late_hours"] = late_hours
-            trip["rate"] = rate
-            trip["earned"] = earned
-            save_db(db)
+            free = charger_free_slots()
+            if to_charging > free:
+                clear_driver_flow(user.id)
+                return f"❌ W międzyczasie zmieniły się ładowarki. Wolne miejsca: {free}. Zacznij zwrot od nowa."
 
             inv = load_inventory()
-            inv["ready"] = int(inv.get("ready", 0)) + int(flow.get("ready_return", 0))
-            inv["charging"] = int(inv.get("charging", 0)) + int(flow.get("to_charging", 0))
-            inv["waiting"] = int(inv.get("waiting", 0)) + int(flow.get("to_waiting", 0))
+            ready_before = int(inv.get("ready", 0))
+            if take_extra > ready_before:
+                clear_driver_flow(user.id)
+                return f"❌ Za mało gotowych do dobrania. Gotowe: {ready_before}, chcesz dobrać: {take_extra}"
+
+            end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
+
+            closed_part = dict(trip)
+            closed_part["qty"] = returned
+            closed_part["end"] = end_time.isoformat()
+            closed_part["returned"] = returned
+            closed_part["charged_inside"] = 0
+            closed_part["hours"] = hours
+            closed_part["late_hours"] = late_hours
+            closed_part["rate"] = rate
+            closed_part["earned"] = earned
+            closed_part["return_control"] = True
+
+            if final_route_qty > 0:
+                trip["qty"] = final_route_qty
+                trip["start"] = end_time.isoformat()
+                trip["alert_sent"] = False
+                trip["alert_60_sent"] = False
+                trip["alert_15_sent"] = False
+                trip.pop("last_overdue_alert_at", None)
+                db["trips"].append(closed_part)
+            else:
+                trip["end"] = end_time.isoformat()
+                trip["returned"] = original_qty
+                trip["charged_inside"] = ready_from_remaining
+                trip["hours"] = hours
+                trip["late_hours"] = late_hours
+                trip["rate"] = rate
+                trip["earned"] = earned
+
+            save_db(db)
+
+            inv["charging"] = int(inv.get("charging", 0)) + to_charging
+            inv["waiting"] = int(inv.get("waiting", 0)) + to_waiting
+            inv["ready"] = int(inv.get("ready", 0)) + ready_from_remaining - take_extra
             save_inventory(inv)
 
-            to_charging = int(flow.get("to_charging", 0))
             if to_charging > 0:
-                start = now()
-                ready_at = start + timedelta(hours=CHARGE_TIME_HOURS)
-                alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
-                jobs_data = load_jobs()
-                jobs = jobs_data.setdefault("jobs", [])
-                jobs.append({
-                    "id": len(jobs) + 1,
-                    "qty": to_charging,
-                    "chat_id": chat_id,
-                    "start_at": start.isoformat(),
-                    "ready_at": ready_at.isoformat(),
-                    "alarm_at": alarm_at.isoformat(),
-                    "alarm_sent": False,
-                    "ready_sent": False,
-                    "status": "charging"
-                })
-                save_jobs(jobs_data)
+                add_charging_job_from_return(chat_id, to_charging)
 
             clear_driver_flow(user.id)
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
 
             return (
-                f"{get_driver_name(user)} zamknął/zamknęła trasę:\n"
-                f"Oddane razem: {returned}\n"
-                f"Gotowe: {flow.get('ready_return', 0)}\n"
-                f"Do ładowarek: {flow.get('to_charging', 0)}\n"
-                f"Oczekujące: {flow.get('to_waiting', 0)}\n"
+                f"✅ KONTROLA ZAPISANA\n\n"
+                f"Kierowca: {get_driver_name(user)}\n"
+                f"Oddane: {returned}\n"
+                f"Do ładowarek: {to_charging}\n"
+                f"Oczekujące: {to_waiting}\n"
+                f"Reszta trasy jako gotowe: {ready_from_remaining}\n"
+                f"Dobrane: {take_extra}\n"
+                f"Zostaje w trasie: {final_route_qty}\n"
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
-                f"Zarobek: £{earned:.2f}\n\n"
+                f"Zarobek za oddane: £{earned:.2f}\n\n"
                 f"{status_report()}"
             )
 
@@ -1740,7 +1945,7 @@ def help_text():
         "🚗 KIEROWCY:\n"
         "Najpierw podaj: Gotowe, Ładowarka, Oczekują.\n"
         "Dopiero potem Zabrane → wpisz np. 30\n"
-        "Oddane → bot rozlicza całą trasę: pyta ile do ładowarek i oczekujących, reszta gotowe.\n"
+        "Oddane → kontrola zwrotu: ładowarki/oczekujące + koniec albo dobieram X.\n"
         "Można też pisać ręcznie: 30 zabrane / oddane 61\n\n"
         "👷‍♂️ KIEROWCY — magazyn:\n"
         "Gotowe → liczba\n"
@@ -2293,10 +2498,11 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v6.8 działa...")
+    print("Telegram Lime Battery Bot PRO v7.0 działa...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
