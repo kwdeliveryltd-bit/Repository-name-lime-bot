@@ -10,34 +10,7 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-
-# 🔥 JEDNORAZOWE CZYSZCZENIE JSON PRZY STARCIE
-# UWAGA: zostaw True tylko na jeden deploy/reset.
-# Po wyczyszczeniu zmień na False, żeby bot nie kasował danych przy każdym restarcie.
-CLEAR_JSON_ON_START = False
-
-JSON_FILES_TO_CLEAR = [
-    "telegram_db.json",
-    "telegram_inventory.json",
-    "telegram_charge_jobs.json",
-    "telegram_driver_checks.json",
-    "telegram_driver_flow.json",
-    "telegram_reset_wizard.json",
-    "telegram_weekly_report.json",
-    "telegram_drivers.json",
-    "telegram_group.json",
-]
-
-if CLEAR_JSON_ON_START:
-    for file_name in JSON_FILES_TO_CLEAR:
-        try:
-            if os.path.exists(file_name):
-                os.remove(file_name)
-                print(f"🔥 Usunięto JSON: {file_name}")
-        except Exception as e:
-            print(f"❌ Nie udało się usunąć {file_name}: {e}")
-
-TELEGRAM_TOKEN = "8687096130:AAHo_9TkKBwUUf_50wu-yPV_eWhtbkxEw3w"
+TELEGRAM_TOKEN = "8687096130:AAFyAcnPHovXDT8cTDPjg-dwuXBpCmKwqK0"
 DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
@@ -54,26 +27,6 @@ FILE_LOCK = threading.RLock()
 # UWAGA: pusta lista oznacza BRAK administratorów.
 ADMIN_IDS = {"6030936882"}
 
-# GŁÓWNA LISTA KIEROWCÓW: numer -> Telegram ID + nazwa.
-# Numery z pustym ID są wolne i nie będą używane do tras.
-DRIVER_BY_NUMBER = {
-    "1": {"id": "8635659517", "name": "Luke"},
-    "2": {"id": "6651434498", "name": "Michał S"},
-    "3": {"id": "7247279842", "name": "Michał P"},
-    "4": {"id": "8006256107", "name": "Piter"},
-    "5": {"id": "6921903873", "name": "Paweł LEGIA"},
-    "6": {"id": "", "name": "WOLNY"},
-    "7": {"id": "8226089815", "name": "Waldek"},
-    "8": {"id": "8087250524", "name": "Alex"},
-    "9": {"id": "7733740199", "name": "Paulina"},
-    "10": {"id": "1051855484", "name": "Krzysztof"},
-    "11": {"id": "8220348868", "name": "Paweł J"},
-    "12": {"id": "", "name": "WOLNY"},
-    "13": {"id": "6030936882", "name": "Kris"},
-    "14": {"id": "7794225975", "name": "Martinez"},
-}
-
-
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
 # Format:
@@ -86,77 +39,68 @@ DRIVER_BY_NUMBER = {
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
 DRIVER_ID_BOOK = {
-    "1": {
+    "lp": {
         "id": "8635659517",
-        "name": "Luke",
-        "aliases": ["1", "luke", "lp"]
+        "name": "Luke Dobosz Od Petera",
+        "aliases": ["luke", "lp", "dobosz", "1"]
     },
-    "2": {
+    "ml": {
         "id": "6651434498",
-        "name": "Michał S",
-        "aliases": ["2", "michal s", "ml"]
+        "name": "Michal Od Kasi Kosmet Londyn",
+        "aliases": ["michal kasi", "ml", "kasi", "2"]
     },
-    "3": {
-        "id": "7247279842",
-        "name": "Michał P",
-        "aliases": ["3", "michal p", "md"]
+    "md": {
+        "id": "8635659517",
+        "name": "Michal Kierowca Od Dobosza",
+        "aliases": ["michal dobosza", "md", "3"]
     },
-    "4": {
+    "p": {
         "id": "8006256107",
         "name": "Piter",
-        "aliases": ["4", "piter"]
+        "aliases": ["piter", "p", "4"]
     },
-    "5": {
+    "pm": {
         "id": "6921903873",
-        "name": "Paweł LEGIA",
-        "aliases": ["5", "pawel", "legia"]
+        "name": "Pawel Drewni Movano",
+        "aliases": ["pawel drewni", "drewni", "movano", "pm", "5"]
     },
-    "6": {
-        "id": "",
-        "name": "WOLNY",
-        "aliases": ["6"]
-    },
-    "7": {
+    "wk": {
         "id": "8226089815",
-        "name": "Waldek",
-        "aliases": ["7", "waldek"]
+        "name": "Waldek Nw Lima Kierowca",
+        "aliases": ["waldek", "wk", "7"]
     },
-    "8": {
+    "al": {
         "id": "8087250524",
-        "name": "Alex",
-        "aliases": ["8", "alex"]
+        "name": "Alex Puchalski Lima",
+        "aliases": ["alex", "al", "8"]
     },
-    "9": {
+    "pk": {
         "id": "7733740199",
-        "name": "Paulina",
-        "aliases": ["9", "paulina"]
+        "name": "Paulinka Moja Księżniczka",
+        "aliases": ["paulina", "paulinka", "pk", "9", "12"]
     },
-    "10": {
+    "kp": {
         "id": "1051855484",
-        "name": "Krzysztof",
-        "aliases": ["10", "krzysztof"]
+        "name": "Krzysztof Kierowca Tomasz Pie",
+        "aliases": ["krzysztof", "tomasz", "kp", "10"]
     },
-    "11": {
+    "pl": {
         "id": "8220348868",
-        "name": "Paweł J",
-        "aliases": ["11", "pawel j"]
+        "name": "Pawel Hanslow Lima",
+        "aliases": ["pawel hanslow", "hanslow", "pl", "11"]
     },
-    "12": {
-        "id": "",
-        "name": "WOLNY",
-        "aliases": ["12"]
-    },
-    "13": {
+    "kris": {
         "id": "6030936882",
         "name": "Kris",
-        "aliases": ["13", "kris"]
+        "aliases": ["kris", "13"]
     },
-    "14": {
+    "mz": {
         "id": "7794225975",
-        "name": "Martinez",
-        "aliases": ["14", "martinez"]
+        "name": "Martinez Kierowca Mitcham Na Lima",
+        "aliases": ["martinez", "mitcham", "mz", "14"]
     }
 }
+
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
 
@@ -171,6 +115,11 @@ CHARGE_TIME_HOURS = 4.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50
 CHARGER_CAPACITY = 133  # maksymalna liczba baterii w ładowarkach
+
+# True = bot tylko przypomina, że baterie są gotowe.
+# Nie przenosi automatycznie z "ładowarki" do "gotowe".
+# Stan magazynu poprawiasz ręcznie komendą: aktualizacja depo ... gotowe ... oczekuje ... ladowarki ...
+MANUAL_CHARGING_MODE = True
 
 
 def now():
@@ -392,24 +341,11 @@ def add_driver_id_command(text):
 
 def driver_search(query):
     """
-    Szuka kierowców po numerze, kodzie, imieniu, nazwisku, aliasie albo username.
-    Numer kierowcy ma pierwszeństwo i wskazuje konkretny Telegram ID z DRIVER_BY_NUMBER.
+    Szuka kierowców po kodzie, jednej literze, imieniu, nazwisku, aliasie albo username.
     """
     q = normalize_text(query).strip().lstrip("@")
     if not q:
         return []
-
-    if q in DRIVER_BY_NUMBER:
-        item = DRIVER_BY_NUMBER[q]
-        uid = str(item.get("id", "")).strip()
-        if not uid:
-            return []
-        return [{
-            "user_id": uid,
-            "name": item.get("name") or q,
-            "username": "",
-            "code": q,
-        }]
 
     results = []
     drivers = load_drivers()
@@ -449,7 +385,7 @@ def driver_search(query):
                 or uid
             )
             results.append({
-                "user_id": str(info.get("id") or uid),
+                "user_id": str(uid),
                 "name": display_name,
                 "username": info.get("username", ""),
                 "code": info.get("code", "")
@@ -1612,8 +1548,16 @@ def handle_driver_flow(text, user, chat_id):
             )
 
         if flow["step"] == "confirm_return_auto":
+            if t in ["gotowe", "ladowarka", "ladowarki", "oczekuja", "oczekujace", "oczekuje"]:
+                return (
+                    "Najpierw zakończ zwrot.\n\n"
+                    "Wpisz: zatwierdz\n"
+                    "albo: anuluj\n\n"
+                    "Dopiero potem aktualizuj stany: gotowe / ladowarki / oczekuje."
+                )
+
             if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
-                return "Wpisz: zatwierdz albo anuluj"
+                return "Wpisz dokładnie: zatwierdz albo anuluj"
 
             db = load_db()
             trip = active_trip(db, user.id)
@@ -1727,6 +1671,30 @@ def clear_reset_wizard(user_id):
         save_reset_wizard(data)
 
 
+def hard_reset_all_files():
+    """Czyści wszystkie pliki stanu bota. Używać tylko świadomie jako admin."""
+    files = [
+        DB_FILE,
+        INVENTORY_FILE,
+        CHARGE_JOBS_FILE,
+        DRIVER_CHECK_FILE,
+        DRIVER_FLOW_FILE,
+        WEEKLY_REPORT_FILE,
+        DRIVERS_FILE,
+        RESET_WIZARD_FILE,
+    ]
+
+    for file_name in files:
+        try:
+            if os.path.exists(file_name):
+                os.remove(file_name)
+                print(f"🔥 hard reset removed: {file_name}")
+        except Exception as e:
+            print(f"hard reset error for {file_name}: {e}")
+
+    USER_STATE.clear()
+
+
 def start_reset_wizard(user, chat_id):
     save_db({"trips": []})
     save_inventory({
@@ -1782,49 +1750,6 @@ def parse_wizard_time(text):
         return None
 
     return now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-
-def reset_wizard_preview(wiz):
-    depot = int(wiz.get("depot_total", 0))
-    ready = int(wiz.get("ready", 0))
-    waiting = int(wiz.get("waiting", 0))
-    charging = int(wiz.get("charging", 0))
-    transit = sum(int(x.get("qty", 0)) for x in wiz.get("trips", []))
-    counted = ready + waiting + charging + transit
-    diff = depot - counted
-
-    lines = [
-        "📝 RESET — PODGLĄD, JESZCZE NIE ZATWIERDZONE",
-        "",
-        f"🏢 Depo total: {depot}",
-        f"📦 Gotowe: {ready}",
-        f"⏳ Oczekujące: {waiting}",
-        f"🔌 W ładowarkach: {charging}",
-        f"🚗 W trasie do zapisania: {transit}",
-    ]
-
-    if wiz.get("trips"):
-        lines.append("")
-        lines.append("Trasy czekające na zatwierdzenie:")
-        for trip in wiz.get("trips", []):
-            try:
-                start_dt = datetime.fromisoformat(trip["start"])
-                start_txt = fmt_dt(start_dt)
-            except Exception:
-                start_txt = str(trip.get("start", "?"))
-            lines.append(f"• {trip.get('driver', 'Nieznany')}: {trip.get('qty', 0)} baterii, start {start_txt}")
-
-    lines += ["", f"🧮 Razem po zatwierdzeniu: {counted}"]
-    if diff > 0:
-        lines.append(f"⚠️ Brakuje do depo: {diff}")
-    elif diff < 0:
-        lines.append(f"🚨 Nadwyżka ponad depo: {abs(diff)}")
-    else:
-        lines.append("✅ Zgadza się z depo")
-
-    lines.append("")
-    lines.append("Wpisz: zatwierdz — dopiero wtedy zapiszę stan na stałe.")
-    return "\n".join(lines)
 
 
 def handle_reset_wizard(text, user, chat_id):
@@ -2003,9 +1928,6 @@ def handle_reset_wizard(text, user, chat_id):
         )
 
     if step == "trips":
-        if t in ["status", "stan", "podglad", "podgląd"]:
-            return reset_wizard_preview(wiz)
-
         if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
             return driver_numbers_text()
 
@@ -2041,11 +1963,13 @@ def handle_reset_wizard(text, user, chat_id):
             start_dt = datetime.fromisoformat(pending["start"])
 
             return (
-                f"✅ Dodano do listy resetu — jeszcze NIE zapisano na stałe.\n\n"
-                f"🚗 {selected['name']}: {pending['qty']} baterii, start {fmt_dt(start_dt)}\n"
-                f"Telegram ID: {selected['user_id']}\n\n"
-                f"Razem w trasie do zatwierdzenia: {total_routes}\n\n"
-                "Dodaj następną trasę albo wpisz: zatwierdz"
+                f"✅ Dodano trasę:\n"
+                f"{selected['name']}: {pending['qty']} baterii, start {fmt_dt(start_dt)}\n"
+                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
+                f"Razem w trasie z resetu: {total_routes}\n\n"
+                "Dodaj następną trasę, np.:\n"
+                "p 55 start 14:52\n"
+                "albo wpisz: zatwierdz"
             )
 
         patterns = [
@@ -2104,10 +2028,10 @@ def handle_reset_wizard(text, user, chat_id):
             total_routes = sum(int(x["qty"]) for x in wiz.get("trips", []))
 
             return (
-                f"✅ Dodano do listy resetu — jeszcze NIE zapisano na stałe.\n\n"
-                f"🚗 {selected['name']}: {qty} baterii, start {fmt_dt(dt)}\n"
-                f"Telegram ID: {selected['user_id']}\n\n"
-                f"Razem w trasie do zatwierdzenia: {total_routes}\n\n"
+                f"✅ Dodano trasę:\n"
+                f"{selected['name']}: {qty} baterii, start {fmt_dt(dt)}\n"
+                f"✅ Telegram ID przypisane: {selected['user_id']}\n\n"
+                f"Razem w trasie z resetu: {total_routes}\n\n"
                 "Dodaj następną trasę albo wpisz: zatwierdz"
             )
 
@@ -2828,21 +2752,26 @@ def charging_status():
 
 
 def driver_numbers_text():
-    lines = ["🔢 KIEROWCY — LEGENDA", ""]
-
-    for num in sorted(DRIVER_BY_NUMBER.keys(), key=lambda x: int(x)):
-        item = DRIVER_BY_NUMBER[num]
-        uid = item.get("id") or "brak ID"
-        name = item.get("name") or "Brak"
-        lines.append(f"{num} — {name} — ID: {uid}")
-
-    lines += [
+    lines = [
+        "🔢 NUMERY KIEROWCÓW",
+        "",
+        "1 — Luke Dobosz Od Petera",
+        "2 — Michal Od Kasi Kosmet Londyn",
+        "3 — Michal Kierowca Od Dobosza",
+        "4 — Piter",
+        "5 — Pawel Drewni Movano",
+        "7 — Waldek Nw Lima Kierowca",
+        "8 — Alex Puchalski Lima",
+        "9 — Paulinka Moja Księżniczka",
+        "10 — Krzysztof Kierowca Tomasz Pie",
+        "11 — Pawel Hanslow Lima",
+        "12 — Paulinka Moja Księżniczka",
+        "13 — Kris",
+        "14 — Martinez Kierowca Mitcham Na Lima",
         "",
         "Format trasy:",
         "1 50 start 12:00",
-        "3 70 start 18:00",
-        "",
-        "W resecie trasy czekają na komendę: zatwierdz"
+        "14 60 start 16:40"
     ]
     return "\n".join(lines)
 
@@ -2886,6 +2815,22 @@ def handle_command(text, user, chat_id):
     name = get_driver_name(user)
     user_id = str(user.id)
     responses = []
+
+    # Komendy awaryjne i informacyjne działają zawsze, nawet gdy użytkownik jest w środku kreatora.
+    if t in ["status", "stan"]:
+        return status_report()
+
+    if t in ["zegarek", "czas", "odliczanie"]:
+        return clock_report()
+
+    if t.startswith("trasy") or t.startswith("aktywni"):
+        return active_trips_text()
+
+    if t == "hard reset":
+        if not is_admin(user):
+            return "❌ Hard reset jest tylko dla administratora."
+        hard_reset_all_files()
+        return "💣 HARD RESET ZROBIONY. Zrób Redeploy w Railway, potem wpisz reset."
 
     # Obsługa wyboru kierowcy po numerze po liście.
     restore_choice_reply = handle_restore_driver_choice(text, user, chat_id)
@@ -2945,9 +2890,7 @@ def handle_command(text, user, chat_id):
         if admin_restore_trip_reply:
             return admin_restore_trip_reply
 
-        # Nie blokuj standardowych komend pomocy/start dla admina.
-        # Wcześniej /start zawierało tekst "start" i wpadało w komunikat błędu.
-        if "start" in t and t not in ["start", "/start", "pomoc", "/pomoc", "help", "/help"]:
+        if "start" in t:
             return (
                 "❌ Nie rozumiem tej komendy ze startem.\n\n"
                 "Użyj np.:\n"
@@ -3317,16 +3260,33 @@ async def charging_scheduler(app: Application):
                     changed = True
 
                 if not job.get("ready_sent") and current >= ready_at:
-                    moved = move_charging_to_ready(qty)
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"✅ BATERIE NAŁADOWANE\n"
-                            f"🔋 Ilość: {moved}\n"
-                            f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
-                            f"{status_report()}"
+                    if MANUAL_CHARGING_MODE:
+                        # Tryb ręczny: nie ruszamy inventory.
+                        # Bot tylko przypomina, że baterie są gotowe do wyjęcia.
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"✅ BATERIE GOTOWE DO WYJĘCIA\n"
+                                f"🔋 Ilość: {qty}\n"
+                                f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
+                                "Stan magazynu NIE został automatycznie zmieniony.\n"
+                                "Po fizycznym sprawdzeniu wpisz np.:\n"
+                                "aktualizacja depo 504 gotowe 196 oczekuje 28 ladowarki 133\n\n"
+                                f"{status_report()}"
+                            )
                         )
-                    )
+                    else:
+                        moved = move_charging_to_ready(qty)
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"✅ BATERIE NAŁADOWANE\n"
+                                f"🔋 Ilość: {moved}\n"
+                                f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
+                                f"{status_report()}"
+                            )
+                        )
+
                     job["ready_sent"] = True
                     job["status"] = "done"
                     changed = True
@@ -3422,7 +3382,36 @@ async def driver_alerts(app: Application):
                             changed = True
 
             if changed:
-                save_db(db)
+                # Nie zapisuj całego starego db, bo mogłoby to przywrócić trasę
+                # usuniętą przez admina w trakcie wysyłania alertów.
+                fresh = load_db()
+                changed_by_key = {
+                    (
+                        str(t.get("user_id", "")),
+                        str(t.get("start", "")),
+                        str(t.get("driver", "")),
+                    ): t
+                    for t in db.get("trips", [])
+                }
+
+                for fresh_trip in fresh.get("trips", []):
+                    key = (
+                        str(fresh_trip.get("user_id", "")),
+                        str(fresh_trip.get("start", "")),
+                        str(fresh_trip.get("driver", "")),
+                    )
+                    updated = changed_by_key.get(key)
+                    if updated:
+                        for flag in [
+                            "alert_60_sent",
+                            "alert_15_sent",
+                            "alert_sent",
+                            "last_overdue_alert_at",
+                        ]:
+                            if flag in updated:
+                                fresh_trip[flag] = updated[flag]
+
+                save_db(fresh)
 
         except Exception as e:
             print("driver_alerts error:", e)
@@ -3474,4 +3463,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
