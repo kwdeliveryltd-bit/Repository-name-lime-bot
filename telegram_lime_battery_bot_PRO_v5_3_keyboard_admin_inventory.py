@@ -601,15 +601,12 @@ def is_admin(user):
 
 
 def get_keyboard(user=None, chat=None):
-    """Telegram keyboard.
+    """Main Telegram keyboard.
 
-    Important:
-    - drivers see only the basic buttons,
-    - admin buttons are shown only to admin in a private chat with the bot,
-      so they will not appear to drivers in the group.
+    Drivers see only operational buttons.
+    Admin buttons are shown only to admins in a private chat with the bot.
     """
 
-    # 👷‍♂️ DRIVERS
     base = [
         ["Pickup", "Return"],
         ["Ready", "Charging", "Waiting"],
@@ -620,7 +617,6 @@ def get_keyboard(user=None, chat=None):
     chat_type = getattr(chat, "type", None)
     is_private_chat = chat_type == "private"
 
-    # 👑 ADMIN – private chat only, never in the group
     if user is not None and is_admin(user) and is_private_chat:
         base += [
             ["Status", "Routes"],
@@ -649,7 +645,7 @@ BUTTON_ACTIONS = {
     "waiting": "oczekuja",
     "depot": "depo",
 
-    # Polish aliases kept for backwards compatibility
+    # Old Polish commands still work
     "zabrane": "zabrane",
     "oddane": "oddane",
     "gotowe": "gotowe",
@@ -1354,7 +1350,7 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
-    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
         return drivers_list_text()
 
     if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
@@ -1456,7 +1452,7 @@ def handle_driver_flow(text, user, chat_id):
 
         if flow["step"] == "confirm_take":
             if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
-                return ("Wybierz: 🟢 OK albo 🔴 Cancel", get_confirm_keyboard())
+                return ("Choose: 🟢 OK or 🔴 Cancel", get_confirm_keyboard())
 
             qty_take = int(flow.get("qty", 0))
             if qty_take < 1:
@@ -1579,17 +1575,17 @@ def handle_driver_flow(text, user, chat_id):
             if missing > 0:
                 return (
                     (
-                        "⚠️ NIEPEŁNY ZWROT\n\n"
-                        f"Masz w trasie: {route_qty}\n"
-                        f"Oddajesz teraz: {qty}\n"
-                        f"Brakuje: {missing}\n\n"
-                        "Czy dodać brakujące baterie do GOTOWYCH?\n\n"
-                        f"➡️ Oddane do rozdzielenia: {qty}\n"
-                        f"🔌 Wolne miejsca w ładowarkach: {free}\n"
-                        f"➡️ Do ładowarek: {to_charging}\n"
-                        f"➡️ Oczekujące: {to_waiting}\n"
-                        f"📦 Do gotowych: {missing}\n\n"
-                        "Wybierz opcję:"
+                        "⚠️ INCOMPLETE RETURN\n\n"
+                        f"Route batteries: {route_qty}\n"
+                        f"Returned now: {qty}\n"
+                        f"Missing: {missing}\n\n"
+                        "Add the missing batteries to READY?\n\n"
+                        f"➡️ Returned to split: {qty}\n"
+                        f"🔌 Free charging slots: {free}\n"
+                        f"➡️ To charging: {to_charging}\n"
+                        f"➡️ To waiting: {to_waiting}\n"
+                        f"📦 To ready: {missing}\n\n"
+                        "Choose:"
                     ),
                     get_confirm_keyboard()
                 )
@@ -1608,7 +1604,10 @@ def handle_driver_flow(text, user, chat_id):
 
         if flow["step"] == "confirm_return_auto":
             if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
-                return ("Wybierz: 🟢 OK albo 🔴 Cancel", get_confirm_keyboard())
+                # Keep the confirmation alive even if the driver presses another menu button.
+                data[key] = flow
+                save_driver_flow(data)
+                return ("Choose: 🟢 OK or 🔴 Cancel", get_confirm_keyboard())
 
             db = load_db()
             trip = active_trip(db, user.id)
@@ -1953,7 +1952,7 @@ def handle_reset_wizard(text, user, chat_id):
         if t in ["numery", "numery kierowcow", "numery kierowców", "kody", "numbers"]:
             return driver_numbers_text()
 
-        if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
+        if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
             return drivers_list_text()
 
         pending = wiz.get("pending_driver_choice")
@@ -2310,19 +2309,19 @@ def set_inventory_command(text):
         changed = True
         notes.append(f"✅ Depo total zapisane: {inv['depot_total']}")
 
-    qty = find_number_near("gotowe|gotowych|ready", t)
+    qty = find_number_near("gotowe|gotowych", t)
     if qty is not None:
         inv["ready"] = qty
         changed = True
         notes.append(f"✅ Gotowe zapisane: {inv['ready']}")
 
-    qty = find_number_near("oczekuje|oczekuja|oczekujace|oczekujacych|waiting", t)
+    qty = find_number_near("oczekuje|oczekuja|oczekujace|oczekujacych", t)
     if qty is not None:
         inv["waiting"] = qty
         changed = True
         notes.append(f"✅ Oczekujące zapisane: {inv['waiting']}")
 
-    qty = find_number_near("ladowarka|ladowarki|w ladowarkach|laduje sie|laduja sie|charging|in charging", t)
+    qty = find_number_near("ladowarka|ladowarki|w ladowarkach|laduje sie|laduja sie", t)
     if qty is not None:
         inv["charging"] = qty
         changed = True
@@ -2833,7 +2832,7 @@ def help_text():
     )
 
 def handle_command(text, user, chat_id):
-    t = normalize_text(text)
+    t = normalize_text(text).strip()
     db = load_db()
     name = get_driver_name(user)
     user_id = str(user.id)
@@ -2871,12 +2870,27 @@ def handle_command(text, user, chat_id):
             clear_reset_wizard(user_id)
         except Exception:
             pass
-        return "❌ Current flow cancelled. You can start again."
+        return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
-    if t in ["ok", "🟢 ok"]:
-        # OK is handled inside Pickup / Return confirmation flows.
-        # Outside a confirmation step, do not change any data.
-        return "ℹ️ Nothing to confirm right now."
+    # HARD GUARD: when a driver is on RETURN confirmation,
+    # other menu buttons like Waiting/Ready/Charging must NOT overwrite the flow.
+    active_flow = load_driver_flow().get(user_id)
+    if (
+        active_flow
+        and active_flow.get("type") == "return_auto"
+        and active_flow.get("step") == "confirm_return_auto"
+    ):
+        if t in ["ok", "🟢 ok", "zatwierdz", "zatwierdź", "potwierdz", "potwierdź"]:
+            return handle_driver_flow("ok", user, chat_id)
+        if t in ["cancel", "🔴 cancel", "anuluj", "stop"]:
+            clear_driver_flow(user.id)
+            USER_STATE.pop(user_id, None)
+            return ("❌ Return cancelled.", get_keyboard(user))
+        return (
+            "⚠️ Return confirmation is still active.\n\n"
+            "Choose: 🟢 OK or 🔴 Cancel",
+            get_confirm_keyboard()
+        )
 
     # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
     # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
@@ -2914,6 +2928,11 @@ def handle_command(text, user, chat_id):
     flow_reply = handle_driver_flow(text, user, chat_id)
     if flow_reply:
         return flow_reply
+
+    # OK only confirms an active flow. Without an active confirmation, do nothing.
+    # Important: do NOT clear driver_flow here, otherwise incomplete return confirmation breaks.
+    if t in ["ok", "🟢 ok"]:
+        return "ℹ️ Nothing to confirm right now."
 
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
@@ -2956,10 +2975,10 @@ def handle_command(text, user, chat_id):
 
         USER_STATE[user_id] = {"action": button_action}
         labels = {
-            "gotowe": "Enter the current number of READY batteries:",
-            "ladowarka": "Enter the current number of batteries in CHARGING:",
-            "oczekuja": "Enter the current number of WAITING batteries:",
-            "depo": "Enter the current DEPOT TOTAL:",
+            "gotowe": "Enter current READY batteries:",
+            "ladowarka": "Enter current batteries in CHARGING:",
+            "oczekuja": "Enter current WAITING batteries:",
+            "depo": "Enter current DEPOT TOTAL:",
         }
         return labels[button_action]
 
@@ -2968,7 +2987,7 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         USER_STATE[user_id] = {"action": text_action}
-        return "Enter the announcement text:" if text_action == "ogloszenie" else "Enter the alert text:"
+        return "Type announcement text:" if text_action == "ogloszenie" else "Type alert text:"
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
@@ -2978,7 +2997,7 @@ def handle_command(text, user, chat_id):
             return "❌ Numery kierowców są tylko dla administratora."
         return driver_numbers_text()
 
-    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
         if not is_admin(user):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
@@ -3020,11 +3039,11 @@ def handle_command(text, user, chat_id):
             return "❌ Aktualizacja stanu jest tylko dla administratora."
         return update_reply
 
-    if t.startswith("ogloszenie ") or t.startswith("announcement ") or t.startswith("alert "):
+    if t.startswith("ogloszenie ") or t.startswith("alert "):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         group_id = load_group().get("chat_id") or chat_id
-        prefix = "📢 ANNOUNCEMENT" if (t.startswith("ogloszenie ") or t.startswith("announcement ")) else "🚨 ALERT"
+        prefix = "📢 OGŁOSZENIE" if t.startswith("ogloszenie ") else "🚨 ALERT"
         original = text.split(" ", 1)[1].strip()
         return {
             "send_to": group_id,
@@ -3085,9 +3104,9 @@ def handle_command(text, user, chat_id):
 
     # Kierowcy mogą wpisywać: gotowe X / ladowarka X / oczekuje X.
     driver_inventory_words = [
-        "gotowe", "gotowych", "ready",
-        "oczekuje", "oczekuja", "oczekujace", "oczekujacych", "waiting",
-        "ladowarka", "ladowarki", "w ladowarkach", "charging", "in charging"
+        "gotowe", "gotowych",
+        "oczekuje", "oczekuja", "oczekujace", "oczekujacych",
+        "ladowarka", "ladowarki", "w ladowarkach"
     ]
     if any(word in t for word in driver_inventory_words):
         inventory_reply = set_inventory_command(text)
@@ -3109,11 +3128,11 @@ def handle_command(text, user, chat_id):
         return active_trips_text()
 
     returned_qty = find_number_near(
-        "oddane|oddalem|oddałem|oddalam|oddałam|oddaje|oddaję|oddal|oddał|zwrot|zwrocilem|zwrocilam|zwracam|return|returned",
+        "return|returned|oddane|oddalem|oddałem|oddalam|oddałam|oddaje|oddaję|oddal|oddał|zwrot|zwrocilem|zwrocilam|zwracam",
         normalize_text(text)
     )
     take_qty = find_number_near(
-        "zabrane|biore|biorę|bierze|wezme|wezmę|wzialem|wziąłem|wzielam|wzięłam|pobieram|pobralem|pobrałam|odebralem|odebrałem|odebralam|odebrałam|odbieram|pickup|picked",
+        "pickup|picked|take|taken|zabrane|biore|biorę|bierze|wezme|wezmę|wzialem|wziąłem|wzielam|wzięłam|pobieram|pobralem|pobrałam|odebralem|odebrałem|odebralam|odebrałam|odbieram",
         normalize_text(text)
     )
 
@@ -3435,10 +3454,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
 
 
