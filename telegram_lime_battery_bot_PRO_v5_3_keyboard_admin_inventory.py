@@ -22,6 +22,7 @@ DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
+# RESET_WIZARD_FILE wyłączony: reset nie zapisuje osobnego JSON-a kreatora
 
 FILE_LOCK = threading.RLock()
 
@@ -203,7 +204,7 @@ def load_inventory():
         "ready": 0,
         "waiting": 0,
         "charging": 0,
-        "updated_at": None
+        "updated_at": now().isoformat()
     })
 
 
@@ -933,9 +934,9 @@ def setup_wizard_start(user_id):
     }
 
     return (
-        "🛡️ KREATOR RESETU URUCHOMIONY\n\n"
-        "Dane NIE zostały jeszcze skasowane ani nadpisane.\n"
-        "Zapis nastąpi dopiero po wpisaniu: zatwierdz\n\n"
+        "🔄 KREATOR RESETU URUCHOMIONY\n\n"
+        "JSON-y nie zostały jeszcze zmienione.\n"
+        "Zapis/czyszczenie nastąpi dopiero po wpisaniu: zatwierdz\n\n"
         "1️⃣ Podaj stan DEPO, np.:\n"
         "494"
     )
@@ -1063,7 +1064,7 @@ def setup_wizard_handle(text, user_id, chat_id):
                 "ready": int(setup.get("ready") or 0),
                 "waiting": int(setup.get("waiting") or 0),
                 "charging": 0,
-                "updated_at": None
+                "updated_at": now().isoformat()
             }
             save_inventory(inv)
 
@@ -1698,25 +1699,24 @@ def handle_driver_flow(text, user, chat_id):
 
 
 
-# Reset wizard działa tylko w pamięci procesu.
-# Nie tworzymy już osobnego pliku JSON kreatora i nie czyścimy danych
-# na samym starcie resetu. Dane produkcyjne są nadpisywane dopiero po "zatwierdz".
-RESET_WIZARD_STATE = {}
-
-
+# Reset wizard jest zapisywany do osobnego pliku JSON.
+# Dzięki temu bot nie "gubi" kroku po restarcie Railway/procesu.
+# UWAGA: to NIE jest plik produkcyjny z danymi stanu; właściwe JSON-y są nadpisywane
+# dopiero po komendzie "zatwierdz".
 def load_reset_wizard():
-    return RESET_WIZARD_STATE
+    return load_json(RESET_WIZARD_FILE, {})
 
 
 def save_reset_wizard(data):
-    RESET_WIZARD_STATE.clear()
-    RESET_WIZARD_STATE.update(data)
+    save_json(RESET_WIZARD_FILE, data)
 
 
 def clear_reset_wizard(user_id):
+    data = load_reset_wizard()
     key = str(user_id)
-    if key in RESET_WIZARD_STATE:
-        del RESET_WIZARD_STATE[key]
+    if key in data:
+        del data[key]
+        save_reset_wizard(data)
 
 
 def start_reset_wizard(user, chat_id):
@@ -1735,11 +1735,11 @@ def start_reset_wizard(user, chat_id):
     save_reset_wizard(data)
 
     return (
-        "🛡️ KREATOR RESETU URUCHOMIONY\n\n"
-        "Dane NIE zostały jeszcze skasowane ani nadpisane.\n"
-        "Zapis nastąpi dopiero po wpisaniu: zatwierdz\n\n"
+        "🔄 RESET ROZPOCZĘTY — dane NIE zostały jeszcze skasowane.\n\n"
+        "Teraz uzupełnimy stan krok po kroku. Zapis nastąpi dopiero po komendzie: zatwierdz\n\n"
         "1/6 Podaj stan DEPO, np.:\n"
-        "504"
+        "504\n\n"
+        "Jeśli bot jest w grupie i nie odpowiada na liczby, odpowiedz liczbą bezpośrednio na tę wiadomość bota albo wyłącz Privacy Mode w BotFather."
     )
 
 
@@ -1791,6 +1791,7 @@ def handle_reset_wizard(text, user, chat_id):
         inv["ready"] = int(wiz.get("ready", 0))
         inv["waiting"] = int(wiz.get("waiting", 0))
         inv["charging"] = int(wiz.get("charging", 0))
+        inv["updated_at"] = now().isoformat()
         save_inventory(inv)
 
         charging = int(wiz.get("charging", 0))
@@ -2816,26 +2817,19 @@ def handle_command(text, user, chat_id):
             return "❌ Tylko administrator może dodawać kierowców."
         return add_driver_reply
 
-    # RESET ma ZAWSZE pierwszeństwo, nawet gdy bot jest w środku formularza/wizarda.
-    if t in ["reset", "reset wszystko", "reset system"]:
+    # RESET ma ZAWSZE pierwszeństwo.
+    # Ważne: sama komenda reset NIE rusza żadnych głównych JSON-ów.
+    # Odpala tylko kreator w pamięci RAM (USER_STATE). Zapis/czyszczenie JSON następuje dopiero po "zatwierdz".
+    if t in ["reset", "/reset", "reset wszystko", "reset system", "/reset wszystko", "/reset_system"]:
         if not is_admin(user):
             return "❌ Reset jest tylko dla administratora."
-        # Nie czyścimy żadnych danych produkcyjnych na starcie resetu.
-        # Reset zapisuje/czyści JSON-y dopiero po finalnym "zatwierdz".
         USER_STATE.pop(user_id, None)
-        try:
-            clear_reset_wizard(user_id)
-        except Exception:
-            pass
-        return start_reset_wizard(user, chat_id)
+        clear_driver_flow(user_id)
+        return setup_wizard_start(user_id)
 
     if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
         USER_STATE.pop(user_id, None)
         clear_driver_flow(user_id)
-        try:
-            clear_reset_wizard(user_id)
-        except Exception:
-            pass
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
     # HARD GUARD: when a driver is on RETURN confirmation,
@@ -2858,13 +2852,12 @@ def handle_command(text, user, chat_id):
             get_confirm_keyboard()
         )
 
-    # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
-    # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
-    reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
-    if reset_wizard_reply:
-        return reset_wizard_reply
+    # Kreator resetu działa tylko po komendzie "reset" i jest trzymany w USER_STATE.
+    # Dzięki temu normalne JSON-y działają tak jak wcześniej, a liczby po resecie są przyjmowane.
+    setup_reply = setup_wizard_handle(text, user_id, chat_id)
+    if setup_reply:
+        return setup_reply
 
-    # Stary setup_wizard jest wyłączony; reset obsługuje tylko bezpieczny reset_wizard.
 
     # Pełne komendy admina z czasem działają poza kreatorem.
     if is_admin(user):
@@ -2962,6 +2955,7 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
+
 
     restore_inventory_reply = restore_inventory_with_start_command(text, chat_id)
     if restore_inventory_reply:
