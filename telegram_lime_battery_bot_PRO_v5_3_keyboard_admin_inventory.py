@@ -600,8 +600,14 @@ def is_admin(user):
     return bool(user) and str(user.id) in ADMIN_IDS
 
 
-def get_keyboard(user=None):
-    """Menu przycisków pod polem wpisywania w Telegramie."""
+def get_keyboard(user=None, chat=None):
+    """Menu przycisków pod polem wpisywania w Telegramie.
+
+    Ważne:
+    - kierowca widzi tylko podstawowe przyciski,
+    - przyciski admina pokazujemy wyłącznie administratorowi w prywatnym czacie z botem,
+      żeby nie pojawiały się kierowcom w grupie.
+    """
 
     # 👷‍♂️ KIEROWCY
     base = [
@@ -610,8 +616,11 @@ def get_keyboard(user=None):
         ["Pomoc"],
     ]
 
-    # 👑 ADMIN – dodatkowe opcje
-    if user is not None and is_admin(user):
+    chat_type = getattr(chat, "type", None)
+    is_private_chat = chat_type == "private"
+
+    # 👑 ADMIN – tylko prywatnie, nigdy na grupie
+    if user is not None and is_admin(user) and is_private_chat:
         base += [
             ["Status", "Trasy"],
             ["Kierowcy", "Numery"],
@@ -619,6 +628,15 @@ def get_keyboard(user=None):
         ]
 
     return ReplyKeyboardMarkup(base, resize_keyboard=True, one_time_keyboard=False)
+
+
+def get_confirm_keyboard():
+    """Klawiatura potwierdzenia dla flow: Zabrane / Oddane."""
+    return ReplyKeyboardMarkup(
+        [["🟢 OK", "🔴 Cancel"]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
 
 
 BUTTON_ACTIONS = {
@@ -945,7 +963,7 @@ def setup_wizard_handle(text, user_id, chat_id):
             return find_number_near(names, t)
         return None
 
-    if t in ["anuluj", "cancel"]:
+    if t in ["anuluj", "cancel", "🔴 cancel"]:
         USER_STATE.pop(key, None)
         return "❌ Kreator anulowany."
 
@@ -1257,8 +1275,8 @@ def start_return_flow(user, chat_id, returned_qty=None):
     Bot sam liczy:
     - ile zmieści się do ładowarek,
     - resztę daje w oczekujące,
-    - wymaga zwrotu pełnej trasy,
-    - zamyka trasę bez opcji dobierania baterii.
+    - jeśli odda mniej niż pobrał, pyta czy brakującą resztę dodać do gotowych,
+    - zamyka trasę po potwierdzeniu.
     """
     db = load_db()
     trip = active_trip(db, user.id)
@@ -1326,7 +1344,7 @@ def handle_driver_flow(text, user, chat_id):
     if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
         return drivers_list_text()
 
-    if t in ["anuluj", "cancel", "stop"]:
+    if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
         clear_driver_flow(user.id)
         return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
 
@@ -1395,13 +1413,15 @@ def handle_driver_flow(text, user, chat_id):
                 data[key] = flow
                 save_driver_flow(data)
                 return (
-                    "✅ Stany potwierdzone.\n\n"
-                    f"Gotowe: {flow['ready']}\n"
-                    f"W ładowarkach: {flow['charging']}\n"
-                    f"Oczekujące: {flow['waiting']}\n"
-                    f"Zabrane: {flow['qty']}\n\n"
-                    "Wpisz: zatwierdz\n"
-                    "albo: anuluj"
+                    (
+                        "✅ Stany potwierdzone.\n\n"
+                        f"Gotowe: {flow['ready']}\n"
+                        f"W ładowarkach: {flow['charging']}\n"
+                        f"Oczekujące: {flow['waiting']}\n"
+                        f"Zabrane: {flow['qty']}\n\n"
+                        "Wybierz opcję:"
+                    ),
+                    get_confirm_keyboard()
                 )
 
             flow["step"] = "take_qty"
@@ -1416,8 +1436,8 @@ def handle_driver_flow(text, user, chat_id):
             )
 
         if flow["step"] == "confirm_take":
-            if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
-                return "Wpisz: zatwierdz albo anuluj"
+            if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
+                return ("Wybierz: 🟢 OK albo 🔴 Cancel", get_confirm_keyboard())
 
             qty_take = int(flow.get("qty", 0))
             if qty_take < 1:
@@ -1528,28 +1548,48 @@ def handle_driver_flow(text, user, chat_id):
             data[key] = flow
             save_driver_flow(data)
 
-            if qty != route_qty:
-                clear_driver_flow(user.id)
-                return f"❌ Musisz zakończyć całą trasę. W trasie masz {route_qty}, więc oddaj pełną liczbę: {route_qty}. Potem możesz zacząć nową trasę od początku."
+            missing = route_qty - qty
 
             flow["next_action"] = "finish"
             flow["take_extra"] = 0
+            flow["missing_to_ready"] = missing
             flow["step"] = "confirm_return_auto"
             data[key] = flow
             save_driver_flow(data)
 
+            if missing > 0:
+                return (
+                    (
+                        "⚠️ NIEPEŁNY ZWROT\n\n"
+                        f"Masz w trasie: {route_qty}\n"
+                        f"Oddajesz teraz: {qty}\n"
+                        f"Brakuje: {missing}\n\n"
+                        "Czy dodać brakujące baterie do GOTOWYCH?\n\n"
+                        f"➡️ Oddane do rozdzielenia: {qty}\n"
+                        f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                        f"➡️ Do ładowarek: {to_charging}\n"
+                        f"➡️ Oczekujące: {to_waiting}\n"
+                        f"📦 Do gotowych: {missing}\n\n"
+                        "Wybierz opcję:"
+                    ),
+                    get_confirm_keyboard()
+                )
+
             return (
-                "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
-                f"Oddane: {qty}\n"
-                f"🔌 Wolne miejsca w ładowarkach: {free}\n"
-                f"➡️ Do ładowarek: {to_charging}\n"
-                f"➡️ Oczekujące: {to_waiting}\n\n"
-                "2/2 Wpisz: zatwierdz albo anuluj"
+                (
+                    "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
+                    f"Oddane: {qty}\n"
+                    f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                    f"➡️ Do ładowarek: {to_charging}\n"
+                    f"➡️ Oczekujące: {to_waiting}\n\n"
+                    "2/2 Wybierz opcję:"
+                ),
+                get_confirm_keyboard()
             )
 
         if flow["step"] == "confirm_return_auto":
-            if t not in ["zatwierdz", "zatwierdź", "ok", "potwierdz", "potwierdź"]:
-                return "Wpisz: zatwierdz albo anuluj"
+            if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
+                return ("Wybierz: 🟢 OK albo 🔴 Cancel", get_confirm_keyboard())
 
             db = load_db()
             trip = active_trip(db, user.id)
@@ -1567,9 +1607,9 @@ def handle_driver_flow(text, user, chat_id):
             ready_from_remaining = remaining_after_return if finish_route else 0
             final_route_qty = 0 if finish_route else remaining_after_return + take_extra
 
-            if returned != original_qty:
+            if returned > original_qty:
                 clear_driver_flow(user.id)
-                return f"❌ Musisz zakończyć całą trasę. W trasie masz {original_qty}, oddane: {returned}. Zacznij zwrot od nowa."
+                return f"❌ Oddane ({returned}) nie może być większe niż trasa ({original_qty}). Zacznij zwrot od nowa."
 
             free = charger_free_slots()
             if to_charging > free:
@@ -1627,6 +1667,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"Oddane: {returned}\n"
                 f"Do ładowarek: {to_charging}\n"
                 f"Oczekujące: {to_waiting}\n"
+                f"Do gotowych z niewykonanej reszty: {ready_from_remaining}\n"
 
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
@@ -1727,11 +1768,11 @@ def handle_reset_wizard(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
-    if t in ["anuluj", "cancel", "stop"]:
+    if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
         clear_reset_wizard(user.id)
         return "❌ Reset wizard przerwany."
 
-    if t in ["zatwierdz", "zatwierdź", "ok", "koniec"]:
+    if t in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "koniec"]:
         if wiz.get("step") != "trips":
             return "Jeszcze nie skończyliśmy. Uzupełnij aktualny krok albo wpisz: anuluj"
 
@@ -2804,7 +2845,7 @@ def handle_command(text, user, chat_id):
             pass
         return start_reset_wizard(user, chat_id)
 
-    if t in ["anuluj", "cancel", "stop"]:
+    if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
         USER_STATE.pop(user_id, None)
         clear_driver_flow(user_id)
         try:
@@ -3132,7 +3173,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Wtedy zapisujemy ID osoby, na której wiadomość admin odpowiedział.
     normalized_message = normalize_text(update.message.text).strip()
     if normalized_message in ["dodaj kierowce", "dodaj kierowcę", "zapisz kierowce", "zapisz kierowcę"]:
-        keyboard = get_keyboard(update.message.from_user)
+        keyboard = get_keyboard(update.message.from_user, update.effective_chat)
 
         if not is_admin(update.message.from_user):
             await update.message.reply_text("❌ Tylko administrator może ręcznie dodawać kierowców.", reply_markup=keyboard)
@@ -3162,10 +3203,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         remember_driver(update.message.reply_to_message.from_user)
 
-    keyboard = get_keyboard(update.message.from_user)
+    keyboard = get_keyboard(update.message.from_user, update.effective_chat)
     reply = handle_command(update.message.text, update.message.from_user, update.message.chat_id)
 
-    if isinstance(reply, dict):
+    if isinstance(reply, tuple):
+        reply_text, reply_keyboard = reply
+        await update.message.reply_text(reply_text, reply_markup=reply_keyboard)
+    elif isinstance(reply, dict):
         await context.bot.send_message(chat_id=reply["send_to"], text=reply["text"])
         await update.message.reply_text(reply.get("confirm", "✅ Gotowe."), reply_markup=keyboard)
     elif reply:
@@ -3278,38 +3322,41 @@ async def driver_alerts(app: Application):
                         trip["alert_15_sent"] = True
                         changed = True
 
+                    # ALERT SPÓŹNIENIA — tylko jeden raz na trasę.
+                    # Telegram nie pozwala ustawić czerwonego koloru tekstu w zwykłej wiadomości,
+                    # więc używamy czerwonych emoji + pogrubienia HTML.
                     if left_minutes < 0 and not trip.get("alert_sent"):
                         late = abs(left_minutes)
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"❌ SKOŃCZYŁ CI SIĘ CZAS\n"
-                                f"🚗 Kierowca: {driver}\n"
-                                f"🔋 Baterie w trasie: {qty}\n"
-                                f"Deadline był o: {fmt_dt(deadline)}\n"
-                                f"Spóźnienie: {late // 60}h {late % 60}min"
-                            )
+                        driver_user_id = str(trip.get("user_id", "")).strip()
+                        target_chat_id = int(driver_user_id) if driver_user_id.isdigit() else chat_id
+
+                        alert_text = (
+                            f"🔴🚨 <b>SKOŃCZYŁ CI SIĘ CZAS</b> 🚨🔴\n\n"
+                            f"🚗 Kierowca: {driver}\n"
+                            f"🔋 Baterie w trasie: {qty}\n"
+                            f"⏰ Deadline był o: {fmt_dt(deadline)}\n"
+                            f"❌ Spóźnienie: {late // 60}h {late % 60}min\n\n"
+                            f"To jest jedyny alert spóźnienia dla tej trasy."
                         )
+
+                        try:
+                            await app.bot.send_message(
+                                chat_id=target_chat_id,
+                                text=alert_text,
+                                parse_mode="HTML"
+                            )
+                        except Exception:
+                            # Jeżeli bot nie może napisać prywatnie do kierowcy,
+                            # wysyła jeden alert na czat trasy/grupę jako fallback.
+                            await app.bot.send_message(
+                                chat_id=chat_id,
+                                text=alert_text,
+                                parse_mode="HTML"
+                            )
+
                         trip["alert_sent"] = True
                         trip["last_overdue_alert_at"] = current.isoformat()
                         changed = True
-
-                    if left_minutes < -30 and trip.get("alert_sent"):
-                        last_iso = trip.get("last_overdue_alert_at")
-                        last_dt = datetime.fromisoformat(last_iso) if last_iso else start
-                        if (current - last_dt).total_seconds() >= 1800:
-                            late = abs(left_minutes)
-                            await app.bot.send_message(
-                                chat_id=chat_id,
-                                text=(
-                                    f"🚨 NADAL PO CZASIE\n"
-                                    f"🚗 Kierowca: {driver}\n"
-                                    f"🔋 Baterie w trasie: {qty}\n"
-                                    f"Spóźnienie: {late // 60}h {late % 60}min"
-                                )
-                            )
-                            trip["last_overdue_alert_at"] = current.isoformat()
-                            changed = True
 
             if changed:
                 save_db(db)
@@ -3364,6 +3411,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
