@@ -3347,43 +3347,87 @@ async def driver_alerts(app: Application):
             current = now()
             changed = False
 
-            for trip in db["trips"]:
-                if trip.get("end") is None:
-                    start = datetime.fromisoformat(trip["start"])
-                    deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
-                    qty = int(trip.get("qty", 0))
-                    driver = trip.get("driver", "Nieznany")
-                    chat_id = trip.get("chat_id") or load_group().get("chat_id")
+            for trip in db.get("trips", []):
+                if trip.get("end") is not None:
+                    continue
 
-                    if not chat_id:
-                        continue
+                start = datetime.fromisoformat(trip["start"])
+                deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+                qty = int(trip.get("qty", 0))
+                driver = trip.get("driver", "Nieznany")
+                chat_id = trip.get("chat_id") or load_group().get("chat_id")
 
-                    left_minutes = int((deadline - current).total_seconds() // 60)
+                if not chat_id:
+                    continue
 
-                    if left_minutes <= 60 and left_minutes > 15 and not trip.get("alert_60_sent"):
+                left_minutes = int((deadline - current).total_seconds() // 60)
+
+                if left_minutes <= 60 and left_minutes > 15 and not trip.get("alert_60_sent"):
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"⏰ ZEGAREK KIEROWCY\n"
+                            f"🚗 {driver}\n"
+                            f"🔋 W trasie: {qty} baterii\n"
+                            f"Zostało około: {left_minutes} min\n"
+                            f"Deadline: {fmt_dt(deadline)}"
+                        )
+                    )
+                    trip["alert_60_sent"] = True
+                    changed = True
+
+                if left_minutes <= 15 and left_minutes >= 0 and not trip.get("alert_15_sent"):
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🚨 ZA 15 MIN KONIEC CZASU\n"
+                            f"🚗 {driver}\n"
+                            f"🔋 W trasie: {qty} baterii\n"
+                            f"Zostało: {left_minutes} min\n"
+                            f"Deadline: {fmt_dt(deadline)}"
+                        )
+                    )
+                    trip["alert_15_sent"] = True
+                    changed = True
+
+                if left_minutes < 0 and not trip.get("alert_sent"):
+                    late = abs(left_minutes)
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"❌ SKOŃCZYŁ CI SIĘ CZAS\n"
+                            f"🚗 Kierowca: {driver}\n"
+                            f"🔋 Baterie w trasie: {qty}\n"
+                            f"Deadline był o: {fmt_dt(deadline)}\n"
+                            f"Spóźnienie: {late // 60}h {late % 60}min"
+                        )
+                    )
+                    trip["alert_sent"] = True
+                    trip["last_overdue_alert_at"] = current.isoformat()
+                    changed = True
+
+                if left_minutes < -30 and trip.get("alert_sent"):
+                    last_iso = trip.get("last_overdue_alert_at")
+                    last_dt = datetime.fromisoformat(last_iso) if last_iso else start
+
+                    if (current - last_dt).total_seconds() >= 1800:
+                        late = abs(left_minutes)
                         await app.bot.send_message(
                             chat_id=chat_id,
                             text=(
-                                f"⏰ ZEGAREK KIEROWCY\n"
-                                f"🚗 {driver}\n"
-                                f"🔋 W trasie: {qty} baterii\n"
-                                f"Zostało około: {left_minutes} min\n"
-                                f"Deadline: {fmt_dt(deadline)}"
+                                f"🚨 NADAL PO CZASIE\n"
+                                f"🚗 Kierowca: {driver}\n"
+                                f"🔋 Baterie w trasie: {qty}\n"
+                                f"Spóźnienie: {late // 60}h {late % 60}min"
                             )
                         )
-                        trip["alert_60_sent"] = True
+                        trip["last_overdue_alert_at"] = current.isoformat()
                         changed = True
 
-                    if left_minutes <= 15 and left_minutes >= 0 and not trip.get("alert_15_sent"):
-                        await app.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"🚨 ZA 15 MIN KONIEC CZASU\n"
-                                f"🚗 {driver}\n"
-                                f"🔋 W trasie: {qty} baterii\n"
-                                f"Zostało: {left_minutes} min\n"
-                                f"Deadline: {fmt_dt(deadline)}"
-                            )
-                        )
-                        trip["alert_15_sent"] = True
-            
+            if changed:
+                save_db(db)
+
+        except Exception as e:
+            print("driver_alerts error:", e)
+
+        await asyncio.sleep(60)
