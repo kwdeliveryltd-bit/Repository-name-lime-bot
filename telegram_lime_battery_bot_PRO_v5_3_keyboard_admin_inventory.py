@@ -10,6 +10,33 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
+
+# 🔥 JEDNORAZOWE CZYSZCZENIE JSON PRZY STARCIE
+# UWAGA: zostaw True tylko na jeden deploy/reset.
+# Po wyczyszczeniu zmień na False, żeby bot nie kasował danych przy każdym restarcie.
+CLEAR_JSON_ON_START = True
+
+JSON_FILES_TO_CLEAR = [
+    "telegram_db.json",
+    "telegram_inventory.json",
+    "telegram_charge_jobs.json",
+    "telegram_driver_checks.json",
+    "telegram_driver_flow.json",
+    "telegram_reset_wizard.json",
+    "telegram_weekly_report.json",
+    "telegram_drivers.json",
+    "telegram_group.json",
+]
+
+if CLEAR_JSON_ON_START:
+    for file_name in JSON_FILES_TO_CLEAR:
+        try:
+            if os.path.exists(file_name):
+                os.remove(file_name)
+                print(f"🔥 Usunięto JSON: {file_name}")
+        except Exception as e:
+            print(f"❌ Nie udało się usunąć {file_name}: {e}")
+
 TELEGRAM_TOKEN = "8687096130:AAFyAcnPHovXDT8cTDPjg-dwuXBpCmKwqK0"
 DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
