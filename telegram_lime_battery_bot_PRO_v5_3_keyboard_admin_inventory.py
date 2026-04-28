@@ -1697,41 +1697,28 @@ def handle_driver_flow(text, user, chat_id):
 
 
 
-RESET_WIZARD_FILE = "telegram_reset_wizard.json"
+# Reset wizard działa tylko w pamięci procesu.
+# Nie tworzymy już osobnego pliku JSON kreatora i nie czyścimy danych
+# na samym starcie resetu. Dane produkcyjne są nadpisywane dopiero po "zatwierdz".
+RESET_WIZARD_STATE = {}
 
 
 def load_reset_wizard():
-    return load_json(RESET_WIZARD_FILE, {})
+    return RESET_WIZARD_STATE
 
 
 def save_reset_wizard(data):
-    save_json(RESET_WIZARD_FILE, data)
+    RESET_WIZARD_STATE.clear()
+    RESET_WIZARD_STATE.update(data)
 
 
 def clear_reset_wizard(user_id):
-    data = load_reset_wizard()
     key = str(user_id)
-    if key in data:
-        del data[key]
-        save_reset_wizard(data)
+    if key in RESET_WIZARD_STATE:
+        del RESET_WIZARD_STATE[key]
 
 
 def start_reset_wizard(user, chat_id):
-    save_db({"trips": []})
-    save_inventory({
-        "depot_total": 0,
-        "ready": 0,
-        "waiting": 0,
-        "charging": 0,
-        "updated_at": None
-    })
-    save_jobs({"jobs": []})
-    save_driver_checks({})
-    try:
-        save_driver_flow({})
-    except Exception:
-        pass
-
     data = load_reset_wizard()
     data[str(user.id)] = {
         "chat_id": chat_id,
@@ -1825,6 +1812,13 @@ def handle_reset_wizard(text, user, chat_id):
             }]})
         else:
             save_jobs({"jobs": []})
+
+        # Czyścimy stare flow/checki dopiero przy finalnym zatwierdzeniu resetu.
+        save_driver_checks({})
+        try:
+            save_driver_flow({})
+        except Exception:
+            pass
 
         db = {"trips": []}
         for trip in wiz.get("trips", []):
@@ -2083,44 +2077,13 @@ def handle_reset_wizard(text, user, chat_id):
 
 def reset_all_command(text):
     """
-    Komenda admina:
-    reset
+    WYŁĄCZONE CELOWO.
 
-    Czyści wszystko:
-    - trasy
-    - magazyn
-    - ładowania
-    - checki kierowców
+    Stary reset kasował pliki JSON natychmiast po komendzie "reset".
+    Aktualnie reset obsługuje wyłącznie start_reset_wizard() + handle_reset_wizard(),
+    a zapis/czyszczenie danych następuje dopiero po komendzie "zatwierdz".
     """
-    t = normalize_text(text).strip()
-
-    if t not in ["reset", "reset wszystko", "reset system"]:
-        return None
-
-    save_db({"trips": []})
-    save_inventory({
-        "depot_total": 0,
-        "ready": 0,
-        "waiting": 0,
-        "charging": 0,
-        "updated_at": None
-    })
-    save_jobs({"jobs": []})
-    save_driver_checks({})
-
-    return (
-        "✅ RESET SYSTEMU ZROBIONY\n\n"
-        "Wyczyszczono:\n"
-        "🚗 trasy\n"
-        "📦 magazyn\n"
-        "🔌 ładowania\n\n"
-        "Teraz wpisz stany i kierowców od nowa, np.:\n"
-        "depo 494\n"
-        "gotowe 77\n"
-        "oczekuje 77\n"
-        "ladowarki 57 start 13:24\n"
-        "Marcin zabrane 55 start 14:52"
-    )
+    return None
 
 
 def restore_inventory_with_start_command(text, chat_id):
@@ -2885,10 +2848,10 @@ def handle_command(text, user, chat_id):
         if t in ["cancel", "🔴 cancel", "anuluj", "stop"]:
             clear_driver_flow(user.id)
             USER_STATE.pop(user_id, None)
-            return ("❌ Return cancelled.", get_keyboard(user))
+            return ("❌ Zwrot anulowany.", get_keyboard(user))
         return (
-            "⚠️ Return confirmation is still active.\n\n"
-            "Choose: 🟢 OK or 🔴 Cancel",
+            "⚠️ Potwierdzenie zwrotu nadal jest aktywne.\n\n"
+            "Wybierz: 🟢 OK albo 🔴 Cancel",
             get_confirm_keyboard()
         )
 
@@ -2898,12 +2861,7 @@ def handle_command(text, user, chat_id):
     if reset_wizard_reply:
         return reset_wizard_reply
 
-    # Jeśli stary kreator po resecie jest aktywny, obsłuż go dopiero po reset_wizard.
-    setup_reply = setup_wizard_handle(text, user_id, chat_id)
-    if setup_reply:
-        if not is_admin(user):
-            return "❌ Kreator resetu jest tylko dla administratora."
-        return setup_reply
+    # Stary setup_wizard jest wyłączony; reset obsługuje tylko bezpieczny reset_wizard.
 
     # Pełne komendy admina z czasem działają poza kreatorem.
     if is_admin(user):
@@ -2932,7 +2890,7 @@ def handle_command(text, user, chat_id):
     # OK only confirms an active flow. Without an active confirmation, do nothing.
     # Important: do NOT clear driver_flow here, otherwise incomplete return confirmation breaks.
     if t in ["ok", "🟢 ok"]:
-        return "ℹ️ Nothing to confirm right now."
+        return "ℹ️ Nie ma teraz nic do potwierdzenia."
 
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
@@ -2975,10 +2933,10 @@ def handle_command(text, user, chat_id):
 
         USER_STATE[user_id] = {"action": button_action}
         labels = {
-            "gotowe": "Enter current READY batteries:",
-            "ladowarka": "Enter current batteries in CHARGING:",
-            "oczekuja": "Enter current WAITING batteries:",
-            "depo": "Enter current DEPOT TOTAL:",
+            "gotowe": "Podaj aktualną liczbę baterii GOTOWYCH:",
+            "ladowarka": "Podaj aktualną liczbę baterii W ŁADOWARKACH:",
+            "oczekuja": "Podaj aktualną liczbę baterii OCZEKUJĄCYCH:",
+            "depo": "Podaj aktualny stan DEPO:",
         }
         return labels[button_action]
 
@@ -2987,7 +2945,7 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         USER_STATE[user_id] = {"action": text_action}
-        return "Type announcement text:" if text_action == "ogloszenie" else "Type alert text:"
+        return "Wpisz treść ogłoszenia:" if text_action == "ogloszenie" else "Wpisz treść alertu:"
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
@@ -3454,6 +3412,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
