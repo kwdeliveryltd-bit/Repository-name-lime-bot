@@ -127,7 +127,7 @@ MIN_RATE = 1.00
 
 CHARGE_TIME_HOURS = 4.5
 ALARM_BEFORE_MINUTES = 15
-LOW_READY_LIMIT = 50
+LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
 CHARGER_CAPACITY = 133  # maksymalna liczba baterii w ładowarkach
 
 
@@ -744,9 +744,7 @@ def status_report():
     else:
         lines.append("✅ Zgadza się z depo")
 
-    if ready < LOW_READY_LIMIT:
-        lines.append("")
-        lines.append(f"🚨 ALARM: mało gotowych baterii ({ready})")
+    # Alarm "mało gotowych baterii" wyłączony na życzenie — status ma nie spamować takim komunikatem.
 
     return "\n".join(lines)
 
@@ -3411,10 +3409,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
 
 
