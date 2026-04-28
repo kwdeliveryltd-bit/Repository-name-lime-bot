@@ -121,6 +121,8 @@ TZ = ZoneInfo("Europe/London")
 BASE_RATE = 2.00
 PENALTY_PER_HOUR = 0.10
 TIME_LIMIT_HOURS = 5
+SMALL_ROUTE_LIMIT_HOURS = 8
+SMALL_ROUTE_MAX_QTY = 30
 MIN_RATE = 1.00
 
 CHARGE_TIME_HOURS = 4.5
@@ -146,6 +148,15 @@ def normalize_text(text):
         .replace("ń", "n")
         .replace("ś", "s")
     )
+
+
+def trip_time_limit_hours(qty):
+    """8h tylko dla tras do 30 baterii włącznie, powyżej 30 zostaje 5h."""
+    try:
+        qty = int(qty)
+    except Exception:
+        qty = 0
+    return SMALL_ROUTE_LIMIT_HOURS if 1 <= qty <= SMALL_ROUTE_MAX_QTY else TIME_LIMIT_HOURS
 
 
 def load_json(path, default):
@@ -457,7 +468,7 @@ def create_restored_trip(driver_name, user_id, chat_id, start_time, qty, manual=
     })
 
     save_db(db)
-    deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+    deadline = start_time + timedelta(hours=trip_time_limit_hours(qty))
 
     return (
         f"✅ ODTWORZONO TRASĘ\n\n"
@@ -691,7 +702,7 @@ def status_report():
         for trip in db["trips"]:
             if trip.get("end") is None:
                 start = datetime.fromisoformat(trip["start"])
-                deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+                deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
                 left_minutes = int((deadline - current).total_seconds() // 60)
                 if left_minutes >= 0:
                     left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
@@ -1246,7 +1257,8 @@ def start_return_flow(user, chat_id, returned_qty=None):
     Bot sam liczy:
     - ile zmieści się do ładowarek,
     - resztę daje w oczekujące,
-    - potem pyta: koniec czy dobieram X.
+    - wymaga zwrotu pełnej trasy,
+    - zamyka trasę bez opcji dobierania baterii.
     """
     db = load_db()
     trip = active_trip(db, user.id)
@@ -1321,7 +1333,7 @@ def handle_driver_flow(text, user, chat_id):
     qty = number_from_text(text)
 
     # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
-    # "koniec", "dobieram X", "zatwierdz" nie mogą być blokowane przez brak liczby.
+    # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
     numeric_steps = {
         ("pickup", "ready"),
         ("pickup", "charging"),
@@ -1423,7 +1435,7 @@ def handle_driver_flow(text, user, chat_id):
                 return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Oddane"
 
             start_time = now()
-            deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+            deadline = start_time + timedelta(hours=trip_time_limit_hours(qty_take))
 
             db["trips"].append({
                 "driver": get_driver_name(user),
@@ -1444,7 +1456,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"{get_driver_name(user)} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty_take}\n"
-                f"Limit: {TIME_LIMIT_HOURS}h\n"
+                f"Limit: {trip_time_limit_hours(qty_take)}h\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -1465,7 +1477,7 @@ def handle_driver_flow(text, user, chat_id):
                 return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Oddane"
 
             start_time = now()
-            deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+            deadline = start_time + timedelta(hours=trip_time_limit_hours(qty))
 
             db["trips"].append({
                 "driver": get_driver_name(user),
@@ -1486,7 +1498,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"{get_driver_name(user)} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty}\n"
-                f"Limit: {TIME_LIMIT_HOURS}h\n"
+                f"Limit: {trip_time_limit_hours(qty)}h\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -1516,59 +1528,23 @@ def handle_driver_flow(text, user, chat_id):
             data[key] = flow
             save_driver_flow(data)
 
-            return (
-                "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
-                f"Oddane teraz: {qty}\n"
-                f"🔌 Wolne miejsca w ładowarkach: {free}\n"
-                f"➡️ Do ładowarek: {to_charging}\n"
-                f"➡️ Oczekujące: {to_waiting}\n"
-                f"Zostaje z poprzedniej trasy: {route_qty - qty}\n\n"
-                "2/3 Co dalej?\n"
-                "Wpisz: koniec\n"
-                "albo: dobieram X"
-            )
+            if qty != route_qty:
+                clear_driver_flow(user.id)
+                return f"❌ Musisz zakończyć całą trasę. W trasie masz {route_qty}, więc oddaj pełną liczbę: {route_qty}. Potem możesz zacząć nową trasę od początku."
 
-        if flow["step"] == "next_action":
-            returned = int(flow.get("returned", 0))
-            remaining_after_return = route_qty - returned
-
-            if t in ["koniec", "zakoncz", "zakończ", "zamknij"]:
-                flow["next_action"] = "finish"
-                flow["take_extra"] = 0
-            else:
-                m = re.search(r"(?:dobieram|dobrac|dobierasz|biore|biorę|zabieram)\s+(\d+)", t)
-                if not m:
-                    return "Wpisz: koniec albo dobieram X"
-
-                extra = int(m.group(1))
-                if extra < 1:
-                    return "🚨 Dobranie musi być minimum 1."
-
-                inv = load_inventory()
-                ready = int(inv.get("ready", 0))
-                if extra > ready:
-                    return f"❌ Za mało gotowych do dobrania. Gotowe: {ready}, chcesz dobrać: {extra}"
-
-                flow["next_action"] = "take_extra"
-                flow["take_extra"] = extra
-
+            flow["next_action"] = "finish"
+            flow["take_extra"] = 0
             flow["step"] = "confirm_return_auto"
             data[key] = flow
             save_driver_flow(data)
 
-            finish_route = flow["next_action"] == "finish"
-            ready_from_remaining = remaining_after_return if finish_route else 0
-            final_route = 0 if finish_route else remaining_after_return + int(flow.get("take_extra", 0))
-
             return (
-                "✅ PODSUMOWANIE:\n\n"
-                f"Oddane: {returned}\n"
-                f"Do ładowarek: {flow.get('to_charging', 0)}\n"
-                f"Oczekujące: {flow.get('to_waiting', 0)}\n"
-                f"Reszta jako gotowe przy końcu trasy: {ready_from_remaining}\n"
-                f"Dobrane: {flow.get('take_extra', 0)}\n"
-                f"Nowy stan w trasie: {final_route}\n\n"
-                "3/3 Wpisz: zatwierdz albo anuluj"
+                "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
+                f"Oddane: {qty}\n"
+                f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                f"➡️ Do ładowarek: {to_charging}\n"
+                f"➡️ Oczekujące: {to_waiting}\n\n"
+                "2/2 Wpisz: zatwierdz albo anuluj"
             )
 
         if flow["step"] == "confirm_return_auto":
@@ -1591,9 +1567,9 @@ def handle_driver_flow(text, user, chat_id):
             ready_from_remaining = remaining_after_return if finish_route else 0
             final_route_qty = 0 if finish_route else remaining_after_return + take_extra
 
-            if returned > original_qty:
+            if returned != original_qty:
                 clear_driver_flow(user.id)
-                return f"❌ Błąd: oddajesz więcej ({returned}) niż masz w trasie ({original_qty})."
+                return f"❌ Musisz zakończyć całą trasę. W trasie masz {original_qty}, oddane: {returned}. Zacznij zwrot od nowa."
 
             free = charger_free_slots()
             if to_charging > free:
@@ -1601,10 +1577,6 @@ def handle_driver_flow(text, user, chat_id):
                 return f"❌ W międzyczasie zmieniły się ładowarki. Wolne miejsca: {free}. Zacznij zwrot od nowa."
 
             inv = load_inventory()
-            ready_before = int(inv.get("ready", 0))
-            if take_extra > ready_before:
-                clear_driver_flow(user.id)
-                return f"❌ Za mało gotowych do dobrania. Gotowe: {ready_before}, chcesz dobrać: {take_extra}"
 
             end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
 
@@ -1655,9 +1627,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"Oddane: {returned}\n"
                 f"Do ładowarek: {to_charging}\n"
                 f"Oczekujące: {to_waiting}\n"
-                f"Reszta trasy jako gotowe: {ready_from_remaining}\n"
-                f"Dobrane: {take_extra}\n"
-                f"Zostaje w trasie: {final_route_qty}\n"
+
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
                 f"Zarobek za oddane: £{earned:.2f}\n\n"
@@ -2373,7 +2343,8 @@ def calc_trip(start_iso, qty):
     start = datetime.fromisoformat(start_iso)
     end = now()
     hours = (end - start).total_seconds() / 3600
-    late_hours = max(0, hours - TIME_LIMIT_HOURS)
+    limit_hours = trip_time_limit_hours(qty)
+    late_hours = max(0, hours - limit_hours)
     penalty_steps = math.ceil(late_hours) if late_hours > 0 else 0
     rate = max(MIN_RATE, BASE_RATE - (penalty_steps * PENALTY_PER_HOUR))
     earned = qty * rate
@@ -2388,7 +2359,7 @@ def active_trips_text():
     for trip in db["trips"]:
         if trip.get("end") is None:
             start = datetime.fromisoformat(trip["start"])
-            deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+            deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
             hours = (current - start).total_seconds() / 3600
             left_minutes = int((deadline - current).total_seconds() // 60)
 
@@ -2681,7 +2652,7 @@ def clock_report():
     else:
         for trip in active:
             start = datetime.fromisoformat(trip["start"])
-            deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+            deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
             left_minutes = int((deadline - current).total_seconds() // 60)
 
             if left_minutes >= 0:
@@ -2775,7 +2746,7 @@ def help_text():
         "🚗 KIEROWCY:\n"
         "Najpierw podaj: Gotowe, Ładowarka, Oczekują.\n"
         "Dopiero potem Zabrane → wpisz np. 30\n"
-        "Oddane → wpisz ile oddajesz, bot sam liczy ładowarki/oczekujące + koniec albo dobieram X.\n"
+        "Oddane → wpisz pełną liczbę z trasy, bot sam liczy ładowarki/oczekujące i zamyka trasę.\n"
         "Można też pisać ręcznie: 30 zabrane / oddane 61\n\n"
         "👷‍♂️ KIEROWCY — magazyn:\n"
         "Gotowe → liczba\n"
@@ -3120,7 +3091,7 @@ def handle_command(text, user, chat_id):
             responses.append(f"Uwaga: {name} ma już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: oddalem X")
         else:
             start_time = now()
-            deadline = start_time + timedelta(hours=TIME_LIMIT_HOURS)
+            deadline = start_time + timedelta(hours=trip_time_limit_hours(take_qty))
             db["trips"].append({
                 "driver": name,
                 "user_id": user_id,
@@ -3136,7 +3107,7 @@ def handle_command(text, user, chat_id):
                 f"{name} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {take_qty}\n"
-                f"Limit: {TIME_LIMIT_HOURS}h\n"
+                f"Limit: {trip_time_limit_hours(take_qty)}h\n"
                 f"Deadline: {deadline.strftime('%H:%M')}"
             )
 
@@ -3269,7 +3240,7 @@ async def driver_alerts(app: Application):
             for trip in db["trips"]:
                 if trip.get("end") is None:
                     start = datetime.fromisoformat(trip["start"])
-                    deadline = start + timedelta(hours=TIME_LIMIT_HOURS)
+                    deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
                     qty = int(trip.get("qty", 0))
                     driver = trip.get("driver", "Nieznany")
                     chat_id = trip.get("chat_id") or load_group().get("chat_id")
