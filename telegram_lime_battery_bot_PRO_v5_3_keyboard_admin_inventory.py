@@ -14,7 +14,7 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 # 🔥 JEDNORAZOWE CZYSZCZENIE JSON PRZY STARCIE
 # UWAGA: zostaw True tylko na jeden deploy/reset.
 # Po wyczyszczeniu zmień na False, żeby bot nie kasował danych przy każdym restarcie.
-CLEAR_JSON_ON_START = True
+CLEAR_JSON_ON_START = False
 
 JSON_FILES_TO_CLEAR = [
     "telegram_db.json",
@@ -37,7 +37,7 @@ if CLEAR_JSON_ON_START:
         except Exception as e:
             print(f"❌ Nie udało się usunąć {file_name}: {e}")
 
-TELEGRAM_TOKEN = "8687096130:AAFyAcnPHovXDT8cTDPjg-dwuXBpCmKwqK0"
+TELEGRAM_TOKEN = "8687096130:AAHo_9TkKBwUUf_50wu-yPV_eWhtbkxEw3w"
 DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
