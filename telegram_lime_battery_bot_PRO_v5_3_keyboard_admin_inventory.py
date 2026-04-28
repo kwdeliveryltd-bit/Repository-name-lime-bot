@@ -10,7 +10,10 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-TELEGRAM_TOKEN = "8687096130:AAFyAcnPHovXDT8cTDPjg-dwuXBpCmKwqK0"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("Brak TELEGRAM_TOKEN w Railway Variables")
 DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
