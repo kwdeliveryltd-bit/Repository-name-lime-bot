@@ -37,10 +37,7 @@ if CLEAR_JSON_ON_START:
         except Exception as e:
             print(f"❌ Nie udało się usunąć {file_name}: {e}")
 
-TELEGRAM_TOKEN = "8687096130:AAHo_9TkKBwUUf_50wu-yPV_eWhtbkxEw3w"
-DB_FILE = "telegram_db.json"
-INVENTORY_FILE = "telegram_inventory.json"
-CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROUP_FILE = "telegram_group.json"
 DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
