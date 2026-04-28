@@ -10,10 +10,7 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TELEGRAM_TOKEN:
-    raise RuntimeError("Brak TELEGRAM_TOKEN w Railway Variables")
-
+TELEGRAM_TOKEN = "8687096130:AAFyAcnPHovXDT8cTDPjg-dwuXBpCmKwqK0"
 DB_FILE = "telegram_db.json"
 INVENTORY_FILE = "telegram_inventory.json"
 CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
@@ -42,27 +39,77 @@ ADMIN_IDS = {"6030936882"}
 # dodaj id a 123456789 Adam Od Dobosza Lima
 # dodaj id paulina 987654321 Paulinka Moja Księżniczka
 DRIVER_ID_BOOK = {
-    "1": {"id": "8635659517", "name": "Luke", "aliases": ["1", "luke", "lp"]},
-    "2": {"id": "6651434498", "name": "Michał S", "aliases": ["2", "michal", "michal s", "ml"]},
-    "3": {"id": "7247279842", "name": "Michał P", "aliases": ["3", "michal p", "md"]},
-    "4": {"id": "8006256107", "name": "Piter", "aliases": ["4", "piter", "peter", "p"]},
-    "5": {"id": "6921903873", "name": "Paweł LEGIA", "aliases": ["5", "pawel", "paweł", "legia", "pm"]},
-    "6": {"id": "", "name": "WOLNY", "aliases": ["6"]},
-    "7": {"id": "8226089815", "name": "Waldek", "aliases": ["7", "waldek", "wk"]},
-    "8": {"id": "8087250524", "name": "Alex", "aliases": ["8", "alex", "al"]},
-    "9": {"id": "7733740199", "name": "Paulina", "aliases": ["9", "paulina", "paulinka", "pk"]},
-    "10": {"id": "1051855484", "name": "Krzysztof", "aliases": ["10", "krzysztof", "kp"]},
-    "11": {"id": "8220348868", "name": "Paweł J", "aliases": ["11", "pawel j", "paweł j", "pl"]},
-    "12": {"id": "", "name": "WOLNY", "aliases": ["12"]},
-    "13": {"id": "6030936882", "name": "Kris", "aliases": ["13", "kris"]},
-    "14": {"id": "7794225975", "name": "Martinez", "aliases": ["14", "martinez", "mz"]},
+    "1": {
+        "id": "8635659517",
+        "name": "Luke",
+        "aliases": ["1", "luke", "lp"]
+    },
+    "2": {
+        "id": "6651434498",
+        "name": "Michał S",
+        "aliases": ["2", "michal s", "ml"]
+    },
+    "3": {
+        "id": "7247279842",
+        "name": "Michał P",
+        "aliases": ["3", "michal p", "md"]
+    },
+    "4": {
+        "id": "8006256107",
+        "name": "Piter",
+        "aliases": ["4", "piter"]
+    },
+    "5": {
+        "id": "6921903873",
+        "name": "Paweł LEGIA",
+        "aliases": ["5", "pawel", "legia"]
+    },
+    "6": {
+        "id": "",
+        "name": "WOLNY",
+        "aliases": ["6"]
+    },
+    "7": {
+        "id": "8226089815",
+        "name": "Waldek",
+        "aliases": ["7", "waldek"]
+    },
+    "8": {
+        "id": "8087250524",
+        "name": "Alex",
+        "aliases": ["8", "alex"]
+    },
+    "9": {
+        "id": "7733740199",
+        "name": "Paulina",
+        "aliases": ["9", "paulina"]
+    },
+    "10": {
+        "id": "1051855484",
+        "name": "Krzysztof",
+        "aliases": ["10", "krzysztof"]
+    },
+    "11": {
+        "id": "8220348868",
+        "name": "Paweł J",
+        "aliases": ["11", "pawel j"]
+    },
+    "12": {
+        "id": "",
+        "name": "WOLNY",
+        "aliases": ["12"]
+    },
+    "13": {
+        "id": "6030936882",
+        "name": "Kris",
+        "aliases": ["13", "kris"]
+    },
+    "14": {
+        "id": "7794225975",
+        "name": "Martinez",
+        "aliases": ["14", "martinez"]
+    }
 }
-
-DRIVER_BY_NUMBER = {
-    number: {"id": item.get("id", ""), "name": item.get("name", "")}
-    for number, item in DRIVER_ID_BOOK.items()
-}
-
 # Pamięć klikniętych przycisków: użytkownik klika akcję, potem wpisuje samą liczbę.
 USER_STATE = {}
 
@@ -298,25 +345,11 @@ def add_driver_id_command(text):
 
 def driver_search(query):
     """
-    Szuka kierowców po numerze, kodzie, imieniu, nazwisku, aliasie albo username.
-    Numer kierowcy ma pierwszeństwo i mapuje bezpośrednio na Telegram ID.
+    Szuka kierowców po kodzie, jednej literze, imieniu, nazwisku, aliasie albo username.
     """
     q = normalize_text(query).strip().lstrip("@")
     if not q:
         return []
-
-    if q in DRIVER_BY_NUMBER:
-        item = DRIVER_BY_NUMBER[q]
-        uid = str(item.get("id", "")).strip()
-        name = item.get("name") or q
-        if not uid:
-            return []
-        return [{
-            "user_id": uid,
-            "name": name,
-            "username": "",
-            "code": q
-        }]
 
     results = []
     drivers = load_drivers()
@@ -356,7 +389,7 @@ def driver_search(query):
                 or uid
             )
             results.append({
-                "user_id": str(info.get("id") or uid),
+                "user_id": str(uid),
                 "name": display_name,
                 "username": info.get("username", ""),
                 "code": info.get("code", "")
@@ -1251,6 +1284,16 @@ def number_from_text(text):
     return int(match.group(0)) if match else None
 
 
+def inventory_mismatch_message(field_name, expected, given):
+    return (
+        "❌ STAN SIĘ NIE ZGADZA\n\n"
+        f"{field_name}: w systemie jest {expected}, a wpisano {given}.\n\n"
+        "Przyjmujemy, że stan po ostatnim kierowcy jest prawdziwy.\n"
+        f"Wpisz poprawnie: {expected}\n"
+        "albo wpisz: anuluj"
+    )
+
+
 def handle_driver_flow(text, user, chat_id):
     """
     Obsługa krok po kroku dla kierowcy.
@@ -1295,42 +1338,49 @@ def handle_driver_flow(text, user, chat_id):
         inv = load_inventory()
 
         if flow["step"] == "ready":
+            expected = int(inv.get("ready", 0))
+            if qty != expected:
+                return inventory_mismatch_message("Gotowe", expected, qty)
+
             flow["ready"] = qty
             flow["step"] = "charging"
-            inv["ready"] = qty
-            save_inventory(inv)
             data[key] = flow
             save_driver_flow(data)
             return (
-                f"✅ Gotowe zapisane: {qty}\n\n"
+                f"✅ Gotowe potwierdzone: {qty}\n\n"
                 "2/4 Podaj ilość baterii W ŁADOWARKACH:"
             )
 
         if flow["step"] == "charging":
             if qty > CHARGER_CAPACITY:
                 return f"❌ Ładowarki mają limit {CHARGER_CAPACITY}. Wpisz poprawną liczbę."
+
+            expected = int(inv.get("charging", 0))
+            if qty != expected:
+                return inventory_mismatch_message("W ładowarkach", expected, qty)
+
             flow["charging"] = qty
             flow["step"] = "waiting"
-            inv["charging"] = qty
-            save_inventory(inv)
             data[key] = flow
             save_driver_flow(data)
             return (
-                f"✅ Ładowarki zapisane: {qty}\n\n"
+                f"✅ Ładowarki potwierdzone: {qty}\n\n"
                 "3/4 Podaj ilość baterii OCZEKUJĄCYCH:"
             )
 
         if flow["step"] == "waiting":
+            expected = int(inv.get("waiting", 0))
+            if qty != expected:
+                return inventory_mismatch_message("Oczekujące", expected, qty)
+
             flow["waiting"] = qty
-            inv["waiting"] = qty
-            save_inventory(inv)
 
             if flow.get("qty"):
                 flow["step"] = "confirm_take"
                 data[key] = flow
                 save_driver_flow(data)
                 return (
-                    "✅ Stany zapisane.\n\n"
+                    "✅ Stany potwierdzone.\n\n"
                     f"Gotowe: {flow['ready']}\n"
                     f"W ładowarkach: {flow['charging']}\n"
                     f"Oczekujące: {flow['waiting']}\n"
@@ -1343,7 +1393,7 @@ def handle_driver_flow(text, user, chat_id):
             data[key] = flow
             save_driver_flow(data)
             return (
-                "✅ Stany zapisane.\n\n"
+                "✅ Stany potwierdzone.\n\n"
                 f"Gotowe: {flow['ready']}\n"
                 f"W ładowarkach: {flow['charging']}\n"
                 f"Oczekujące: {flow['waiting']}\n\n"
@@ -2691,21 +2741,26 @@ def charging_status():
 
 
 def driver_numbers_text():
-    lines = ["🔢 KIEROWCY — LEGENDA", ""]
-
-    for num in sorted(DRIVER_BY_NUMBER.keys(), key=lambda x: int(x)):
-        item = DRIVER_BY_NUMBER[num]
-        name = item.get("name") or "Brak"
-        uid = item.get("id") or "brak ID"
-        lines.append(f"{num} — {name} — ID: {uid}")
-
-    lines += [
+    lines = [
+        "🔢 NUMERY KIEROWCÓW",
+        "",
+        "1 — Luke Dobosz Od Petera",
+        "2 — Michal Od Kasi Kosmet Londyn",
+        "3 — Michal Kierowca Od Dobosza",
+        "4 — Piter",
+        "5 — Pawel Drewni Movano",
+        "7 — Waldek Nw Lima Kierowca",
+        "8 — Alex Puchalski Lima",
+        "9 — Paulinka Moja Księżniczka",
+        "10 — Krzysztof Kierowca Tomasz Pie",
+        "11 — Pawel Hanslow Lima",
+        "12 — Paulinka Moja Księżniczka",
+        "13 — Kris",
+        "14 — Martinez Kierowca Mitcham Na Lima",
         "",
         "Format trasy:",
         "1 50 start 12:00",
-        "7 60 start 16:40",
-        "",
-        "Czyli: numer kierowcy + ilość baterii + start godzina."
+        "14 60 start 16:40"
     ]
     return "\n".join(lines)
 
@@ -2743,65 +2798,12 @@ def help_text():
         "Raport tygodniowy firmy idzie automatycznie w poniedziałek o 06:00.\n"
     )
 
-
-def hard_reset_all():
-    """Twarde czyszczenie wszystkich plików runtime JSON i pamięci rozmów."""
-    for file_name in [
-        DB_FILE,
-        INVENTORY_FILE,
-        CHARGE_JOBS_FILE,
-        GROUP_FILE,
-        DRIVER_CHECK_FILE,
-        DRIVER_FLOW_FILE,
-        WEEKLY_REPORT_FILE,
-        DRIVERS_FILE,
-        RESET_WIZARD_FILE,
-    ]:
-        try:
-            if os.path.exists(file_name):
-                os.remove(file_name)
-        except Exception as e:
-            print("hard_reset_all error:", file_name, e)
-
-    USER_STATE.clear()
-
-
 def handle_command(text, user, chat_id):
-    t = normalize_text(text).strip()
+    t = normalize_text(text)
     db = load_db()
     name = get_driver_name(user)
     user_id = str(user.id)
     responses = []
-
-    # Globalne komendy, które działają nawet gdy użytkownik jest w środku flow.
-    if t in ["status", "stan"]:
-        return status_report()
-
-    if t in ["trasy", "aktywni", "aktywne trasy"]:
-        return active_trips_text()
-
-    if t in ["zegarek", "czas", "odliczanie"]:
-        return clock_report()
-
-    if t in ["pomoc", "help", "/start", "start"]:
-        USER_STATE.pop(user_id, None)
-        return help_text()
-
-    if t in ["anuluj", "cancel", "stop"]:
-        USER_STATE.pop(user_id, None)
-        clear_driver_flow(user_id)
-        try:
-            clear_reset_wizard(user_id)
-        except Exception:
-            pass
-        return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
-
-    if t == "hard reset":
-        if not is_admin(user):
-            return "❌ Hard reset jest tylko dla administratora."
-        hard_reset_all()
-        return "💣 HARD RESET ZROBIONY. Zrób Redeploy w Railway, potem wpisz: reset."
-
 
     # Obsługa wyboru kierowcy po numerze po liście.
     restore_choice_reply = handle_restore_driver_choice(text, user, chat_id)
@@ -3231,17 +3233,13 @@ async def charging_scheduler(app: Application):
                     changed = True
 
                 if not job.get("ready_sent") and current >= ready_at:
-                    # Nie przenosimy automatycznie z ładowarek do gotowych.
-                    # Stan ładowarek/gotowych jest aktualizowany ręcznie komendą:
-                    # aktualizacja depo ... gotowe ... oczekuje ... ladowarki ...
+                    moved = move_charging_to_ready(qty)
                     await app.bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"✅ BATERIE POWINNY BYĆ NAŁADOWANE\n"
-                            f"🔋 Ilość: {qty}\n"
+                            f"✅ BATERIE NAŁADOWANE\n"
+                            f"🔋 Ilość: {moved}\n"
                             f"⏰ Gotowe od: {fmt_dt(ready_at)}\n\n"
-                            f"📌 Stan NIE został automatycznie zmieniony.\n"
-                            f"Zaktualizuj ręcznie: gotowe / ladowarki / oczekuje.\n\n"
                             f"{status_report()}"
                         )
                     )
@@ -3392,4 +3390,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
