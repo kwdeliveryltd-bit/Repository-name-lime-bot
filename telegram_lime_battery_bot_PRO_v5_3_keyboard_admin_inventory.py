@@ -601,30 +601,31 @@ def is_admin(user):
 
 
 def get_keyboard(user=None, chat=None):
-    """Menu przycisków pod polem wpisywania w Telegramie.
+    """Telegram keyboard.
 
-    Ważne:
-    - kierowca widzi tylko podstawowe przyciski,
-    - przyciski admina pokazujemy wyłącznie administratorowi w prywatnym czacie z botem,
-      żeby nie pojawiały się kierowcom w grupie.
+    Important:
+    - drivers see only the basic buttons,
+    - admin buttons are shown only to admin in a private chat with the bot,
+      so they will not appear to drivers in the group.
     """
 
-    # 👷‍♂️ KIEROWCY
+    # 👷‍♂️ DRIVERS
     base = [
-        ["Zabrane", "Oddane"],
-        ["Gotowe", "Ładowarka", "Oczekują"],
-        ["Pomoc"],
+        ["Pickup", "Return"],
+        ["Ready", "Charging", "Waiting"],
+        ["Help"],
+        ["🟢 OK", "🔴 Cancel"],
     ]
 
     chat_type = getattr(chat, "type", None)
     is_private_chat = chat_type == "private"
 
-    # 👑 ADMIN – tylko prywatnie, nigdy na grupie
+    # 👑 ADMIN – private chat only, never in the group
     if user is not None and is_admin(user) and is_private_chat:
         base += [
-            ["Status", "Trasy"],
-            ["Kierowcy", "Numery"],
-            ["Depo", "Ogłoszenie", "Alert"],
+            ["Status", "Routes"],
+            ["Drivers", "Numbers"],
+            ["Depot", "Announcement", "Alert"],
         ]
 
     return ReplyKeyboardMarkup(base, resize_keyboard=True, one_time_keyboard=False)
@@ -640,6 +641,15 @@ def get_confirm_keyboard():
 
 
 BUTTON_ACTIONS = {
+    # English buttons
+    "pickup": "zabrane",
+    "return": "oddane",
+    "ready": "gotowe",
+    "charging": "ladowarka",
+    "waiting": "oczekuja",
+    "depot": "depo",
+
+    # Polish aliases kept for backwards compatibility
     "zabrane": "zabrane",
     "oddane": "oddane",
     "gotowe": "gotowe",
@@ -656,7 +666,7 @@ def only_number(text):
 
 
 def admin_text_action(t):
-    if t in ["ogloszenie", "ogłoszenie"]:
+    if t in ["ogloszenie", "ogłoszenie", "announcement"]:
         return "ogloszenie"
     if t == "alert":
         return "alert"
@@ -1136,6 +1146,9 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     Kierowca chce zabrać baterie, ale najpierw musi sprawdzić stany:
     gotowe, ladowarki, oczekuje, a dopiero potem ilość zabranych.
     """
+    inv = load_inventory()
+    expected_ready = int(inv.get("ready", 0))
+
     data = load_driver_flow()
     data[str(user.id)] = {
         "type": "pickup",
@@ -1153,6 +1166,8 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     return (
         "🚗 KONTROLA PRZED ZABRANIEM\n\n"
         "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
+        f"📌 STAN Z PAMIĘCI — GOTOWE: {expected_ready}\n"
+        f"✅ Wpisz dokładnie: {expected_ready}\n"
         + (f"\nZapamiętałem, że chcesz zabrać: {pending_qty}." if pending_qty else "")
         + "\n\n1/4 Podaj ilość GOTOWYCH baterii:"
     )
@@ -1339,7 +1354,7 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
-    if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
         return drivers_list_text()
 
     if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
@@ -1377,8 +1392,11 @@ def handle_driver_flow(text, user, chat_id):
             flow["step"] = "charging"
             data[key] = flow
             save_driver_flow(data)
+            expected_charging = int(inv.get("charging", 0))
             return (
                 f"✅ Gotowe potwierdzone: {qty}\n\n"
+                f"📌 STAN Z PAMIĘCI — W ŁADOWARKACH: {expected_charging}\n"
+                f"✅ Wpisz dokładnie: {expected_charging}\n\n"
                 "2/4 Podaj ilość baterii W ŁADOWARKACH:"
             )
 
@@ -1394,8 +1412,11 @@ def handle_driver_flow(text, user, chat_id):
             flow["step"] = "waiting"
             data[key] = flow
             save_driver_flow(data)
+            expected_waiting = int(inv.get("waiting", 0))
             return (
                 f"✅ Ładowarki potwierdzone: {qty}\n\n"
+                f"📌 STAN Z PAMIĘCI — OCZEKUJĄCE: {expected_waiting}\n"
+                f"✅ Wpisz dokładnie: {expected_waiting}\n\n"
                 "3/4 Podaj ilość baterii OCZEKUJĄCYCH:"
             )
 
@@ -1427,9 +1448,9 @@ def handle_driver_flow(text, user, chat_id):
             save_driver_flow(data)
             return (
                 "✅ Stany potwierdzone.\n\n"
-                f"Gotowe: {flow['ready']}\n"
-                f"W ładowarkach: {flow['charging']}\n"
-                f"Oczekujące: {flow['waiting']}\n\n"
+                f"📌 GOTOWE DO POBRANIA: {flow['ready']}\n"
+                f"🔌 W ładowarkach: {flow['charging']}\n"
+                f"⏳ Oczekujące: {flow['waiting']}\n\n"
                 "4/4 Ile baterii ZABIERASZ?"
             )
 
@@ -1929,10 +1950,10 @@ def handle_reset_wizard(text, user, chat_id):
         )
 
     if step == "trips":
-        if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
+        if t in ["numery", "numery kierowcow", "numery kierowców", "kody", "numbers"]:
             return driver_numbers_text()
 
-        if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+        if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
             return drivers_list_text()
 
         pending = wiz.get("pending_driver_choice")
@@ -2289,19 +2310,19 @@ def set_inventory_command(text):
         changed = True
         notes.append(f"✅ Depo total zapisane: {inv['depot_total']}")
 
-    qty = find_number_near("gotowe|gotowych", t)
+    qty = find_number_near("gotowe|gotowych|ready", t)
     if qty is not None:
         inv["ready"] = qty
         changed = True
         notes.append(f"✅ Gotowe zapisane: {inv['ready']}")
 
-    qty = find_number_near("oczekuje|oczekuja|oczekujace|oczekujacych", t)
+    qty = find_number_near("oczekuje|oczekuja|oczekujace|oczekujacych|waiting", t)
     if qty is not None:
         inv["waiting"] = qty
         changed = True
         notes.append(f"✅ Oczekujące zapisane: {inv['waiting']}")
 
-    qty = find_number_near("ladowarka|ladowarki|w ladowarkach|laduje sie|laduja sie", t)
+    qty = find_number_near("ladowarka|ladowarki|w ladowarkach|laduje sie|laduja sie|charging|in charging", t)
     if qty is not None:
         inv["charging"] = qty
         changed = True
@@ -2850,7 +2871,12 @@ def handle_command(text, user, chat_id):
             clear_reset_wizard(user_id)
         except Exception:
             pass
-        return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
+        return "❌ Current flow cancelled. You can start again."
+
+    if t in ["ok", "🟢 ok"]:
+        # OK is handled inside Pickup / Return confirmation flows.
+        # Outside a confirmation step, do not change any data.
+        return "ℹ️ Nothing to confirm right now."
 
     # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
     # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
@@ -2930,10 +2956,10 @@ def handle_command(text, user, chat_id):
 
         USER_STATE[user_id] = {"action": button_action}
         labels = {
-            "gotowe": "Podaj aktualną liczbę GOTOWYCH baterii:",
-            "ladowarka": "Podaj aktualną liczbę baterii W ŁADOWARKACH:",
-            "oczekuja": "Podaj aktualną liczbę OCZEKUJĄCYCH baterii:",
-            "depo": "Podaj aktualny DEPO TOTAL:",
+            "gotowe": "Enter the current number of READY batteries:",
+            "ladowarka": "Enter the current number of batteries in CHARGING:",
+            "oczekuja": "Enter the current number of WAITING batteries:",
+            "depo": "Enter the current DEPOT TOTAL:",
         }
         return labels[button_action]
 
@@ -2942,17 +2968,17 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         USER_STATE[user_id] = {"action": text_action}
-        return "Wpisz treść ogłoszenia:" if text_action == "ogloszenie" else "Wpisz treść alertu:"
+        return "Enter the announcement text:" if text_action == "ogloszenie" else "Enter the alert text:"
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
 
-    if t in ["numery", "numery kierowcow", "numery kierowców", "kody"]:
+    if t in ["numery", "numery kierowcow", "numery kierowców", "kody", "numbers"]:
         if not is_admin(user):
             return "❌ Numery kierowców są tylko dla administratora."
         return driver_numbers_text()
 
-    if t in ["kierowcy", "lista kierowcow", "lista kierowców"]:
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers", "drivers list"]:
         if not is_admin(user):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
@@ -2994,11 +3020,11 @@ def handle_command(text, user, chat_id):
             return "❌ Aktualizacja stanu jest tylko dla administratora."
         return update_reply
 
-    if t.startswith("ogloszenie ") or t.startswith("alert "):
+    if t.startswith("ogloszenie ") or t.startswith("announcement ") or t.startswith("alert "):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         group_id = load_group().get("chat_id") or chat_id
-        prefix = "📢 OGŁOSZENIE" if t.startswith("ogloszenie ") else "🚨 ALERT"
+        prefix = "📢 ANNOUNCEMENT" if (t.startswith("ogloszenie ") or t.startswith("announcement ")) else "🚨 ALERT"
         original = text.split(" ", 1)[1].strip()
         return {
             "send_to": group_id,
@@ -3059,9 +3085,9 @@ def handle_command(text, user, chat_id):
 
     # Kierowcy mogą wpisywać: gotowe X / ladowarka X / oczekuje X.
     driver_inventory_words = [
-        "gotowe", "gotowych",
-        "oczekuje", "oczekuja", "oczekujace", "oczekujacych",
-        "ladowarka", "ladowarki", "w ladowarkach"
+        "gotowe", "gotowych", "ready",
+        "oczekuje", "oczekuja", "oczekujace", "oczekujacych", "waiting",
+        "ladowarka", "ladowarki", "w ladowarkach", "charging", "in charging"
     ]
     if any(word in t for word in driver_inventory_words):
         inventory_reply = set_inventory_command(text)
@@ -3079,15 +3105,15 @@ def handle_command(text, user, chat_id):
     if t in ["zegarek", "czas", "odliczanie"]:
         return clock_report()
 
-    if t.startswith("trasy") or t.startswith("aktywni"):
+    if t.startswith("trasy") or t.startswith("aktywni") or t.startswith("routes") or t.startswith("active"):
         return active_trips_text()
 
     returned_qty = find_number_near(
-        "oddane|oddalem|oddałem|oddalam|oddałam|oddaje|oddaję|oddal|oddał|zwrot|zwrocilem|zwrocilam|zwracam",
+        "oddane|oddalem|oddałem|oddalam|oddałam|oddaje|oddaję|oddal|oddał|zwrot|zwrocilem|zwrocilam|zwracam|return|returned",
         normalize_text(text)
     )
     take_qty = find_number_near(
-        "zabrane|biore|biorę|bierze|wezme|wezmę|wzialem|wziąłem|wzielam|wzięłam|pobieram|pobralem|pobrałam|odebralem|odebrałem|odebralam|odebrałam|odbieram",
+        "zabrane|biore|biorę|bierze|wezme|wezmę|wzialem|wziąłem|wzielam|wzięłam|pobieram|pobralem|pobrałam|odebralem|odebrałem|odebralam|odebrałam|odbieram|pickup|picked",
         normalize_text(text)
     )
 
@@ -3409,6 +3435,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
