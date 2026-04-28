@@ -933,8 +933,9 @@ def setup_wizard_start(user_id):
     }
 
     return (
-        "✅ RESET SYSTEMU ZROBIONY\n\n"
-        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "🛡️ KREATOR RESETU URUCHOMIONY\n\n"
+        "Dane NIE zostały jeszcze skasowane ani nadpisane.\n"
+        "Zapis nastąpi dopiero po wpisaniu: zatwierdz\n\n"
         "1️⃣ Podaj stan DEPO, np.:\n"
         "494"
     )
@@ -1734,8 +1735,9 @@ def start_reset_wizard(user, chat_id):
     save_reset_wizard(data)
 
     return (
-        "✅ RESET SYSTEMU ZROBIONY\n\n"
-        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "🛡️ KREATOR RESETU URUCHOMIONY\n\n"
+        "Dane NIE zostały jeszcze skasowane ani nadpisane.\n"
+        "Zapis nastąpi dopiero po wpisaniu: zatwierdz\n\n"
         "1/6 Podaj stan DEPO, np.:\n"
         "504"
     )
@@ -2818,8 +2820,9 @@ def handle_command(text, user, chat_id):
     if t in ["reset", "reset wszystko", "reset system"]:
         if not is_admin(user):
             return "❌ Reset jest tylko dla administratora."
+        # Nie czyścimy żadnych danych produkcyjnych na starcie resetu.
+        # Reset zapisuje/czyści JSON-y dopiero po finalnym "zatwierdz".
         USER_STATE.pop(user_id, None)
-        clear_driver_flow(user_id)
         try:
             clear_reset_wizard(user_id)
         except Exception:
@@ -2959,13 +2962,6 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
-
-
-    reset_reply = reset_all_command(text)
-    if reset_reply:
-        if not is_admin(user):
-            return "❌ Reset jest tylko dla administratora."
-        return reset_reply
 
     restore_inventory_reply = restore_inventory_with_start_command(text, chat_id)
     if restore_inventory_reply:
@@ -3412,10 +3408,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
 
 
