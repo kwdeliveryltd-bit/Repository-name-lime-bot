@@ -1464,7 +1464,7 @@ def handle_driver_flow(text, user, chat_id):
                 return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {qty_take}"
 
             db = load_db()
-            existing = active_trip(db, user.id)
+            existing = active_trip(db, user.id, user)
             if existing:
                 clear_driver_flow(user.id)
                 return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Oddane"
@@ -1506,7 +1506,7 @@ def handle_driver_flow(text, user, chat_id):
                 return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {qty}"
 
             db = load_db()
-            existing = active_trip(db, user.id)
+            existing = active_trip(db, user.id, user)
             if existing:
                 clear_driver_flow(user.id)
                 return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Oddane"
@@ -2430,23 +2430,42 @@ def driver_aliases_for_user(user):
 
 
 def active_trip(db, user_id, user=None):
+    """
+    Finds an active route safely.
+
+    1) Exact Telegram ID is always preferred.
+    2) If the route was restored manually and saved with a wrong/manual ID,
+       match by known driver aliases/profile name.
+    """
+    user_id = str(user_id)
+
     # 1) Main safe match: exact Telegram ID.
     for trip in reversed(db["trips"]):
-        if str(trip.get("user_id", "")) == str(user_id) and trip.get("end") is None:
+        if trip.get("end") is None and str(trip.get("user_id", "")) == user_id:
             return trip
 
     # 2) Fallback for restored/manual routes where Telegram ID in trip is wrong.
-    # Match only against known aliases from the driver book/current Telegram profile.
     aliases = driver_aliases_for_user(user)
     if aliases:
+        clean_aliases = {a for a in aliases if a and len(a) >= 2}
         for trip in reversed(db["trips"]):
             if trip.get("end") is not None:
                 continue
+
             driver = normalize_text(str(trip.get("driver", ""))).strip()
             if not driver:
                 continue
-            if any(alias == driver or alias in driver or driver in alias for alias in aliases):
+
+            # Exact / contains match.
+            if any(alias == driver or alias in driver or driver in alias for alias in clean_aliases):
                 return trip
+
+            # Token fallback, e.g. "Michał Kierowca Od Dobosza" vs "Michal Pietrzak".
+            driver_tokens = {x for x in re.split(r"\s+", driver) if len(x) >= 3}
+            for alias in clean_aliases:
+                alias_tokens = {x for x in re.split(r"\s+", alias) if len(x) >= 3}
+                if driver_tokens and alias_tokens and driver_tokens.intersection(alias_tokens):
+                    return trip
 
     return None
 
@@ -2925,6 +2944,30 @@ def handle_command(text, user, chat_id):
             pass
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
+    # HARD PRIORITY: these commands must work even if an old wizard/USER_STATE is stuck.
+    # This prevents "status" from being treated as a wizard answer and corrupting inventory.
+    if t in ["status", "stan"]:
+        return status_report()
+
+    if t.startswith("trasy") or t.startswith("aktywni") or t.startswith("routes") or t.startswith("active"):
+        return active_trips_text()
+
+    if t in ["pomoc", "help", "/start", "start"]:
+        return help_text()
+
+    if t in ["moj id", "moje id"]:
+        return f"Twoje Telegram ID: {user_id}"
+
+    if t in ["numery", "numery kierowcow", "numery kierowców", "kody", "numbers"]:
+        if not is_admin(user):
+            return "❌ Numery kierowców są tylko dla administratora."
+        return driver_numbers_text()
+
+    if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
+        if not is_admin(user):
+            return "❌ Lista kierowców jest tylko dla administratora."
+        return drivers_list_text()
+
     # HARD GUARD: when a driver is on RETURN confirmation,
     # other menu buttons like Waiting/Ready/Charging must NOT overwrite the flow.
     active_flow = load_driver_flow().get(user_id)
@@ -3223,7 +3266,7 @@ def handle_command(text, user, chat_id):
         if take_qty > ready:
             return f"❌ Za mało gotowych baterii. Gotowe: {ready}, próbujesz zabrać: {take_qty}"
 
-        existing = active_trip(db, user_id)
+        existing = active_trip(db, user_id, user)
         if existing:
             responses.append(f"Uwaga: {name} ma już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: oddalem X")
         else:
@@ -3507,10 +3550,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
 
 
