@@ -3515,7 +3515,7 @@ async def driver_alerts(app: Application):
         await asyncio.sleep(60)
 
 
-async def weekly_report_scheduler(app: Application):
+async def weekly_report_scheduler(app:  Application):
     while True:
         try:
             current = now()
