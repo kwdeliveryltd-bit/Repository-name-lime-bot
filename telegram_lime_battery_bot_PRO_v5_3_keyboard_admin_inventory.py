@@ -25,7 +25,7 @@ DRIVERS_FILE = "telegram_drivers.json"
 
 FILE_LOCK = threading.RLock()
 
-# Wpisz tutaj swoje ID z Telegrama po użyciu komendy: moj id
+# Wpisz tutaj swoje ID z Telegrama po użyciu  komendy: moj id
 # Przykład: ADMIN_IDS = {"123456789"}
 # UWAGA: pusta lista oznacza BRAK administratorów.
 ADMIN_IDS = {"6030936882"}
