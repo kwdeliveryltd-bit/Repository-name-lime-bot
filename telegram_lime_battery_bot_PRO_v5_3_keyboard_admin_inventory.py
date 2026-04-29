@@ -22,7 +22,6 @@ DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
-# RESET_WIZARD_FILE wyłączony: reset nie zapisuje osobnego JSON-a kreatora
 
 FILE_LOCK = threading.RLock()
 
@@ -204,7 +203,7 @@ def load_inventory():
         "ready": 0,
         "waiting": 0,
         "charging": 0,
-        "updated_at": now().isoformat()
+        "updated_at": None
     })
 
 
@@ -934,9 +933,8 @@ def setup_wizard_start(user_id):
     }
 
     return (
-        "🔄 KREATOR RESETU URUCHOMIONY\n\n"
-        "JSON-y nie zostały jeszcze zmienione.\n"
-        "Zapis/czyszczenie nastąpi dopiero po wpisaniu: zatwierdz\n\n"
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Teraz uzupełnimy dane krok po kroku.\n\n"
         "1️⃣ Podaj stan DEPO, np.:\n"
         "494"
     )
@@ -1064,7 +1062,7 @@ def setup_wizard_handle(text, user_id, chat_id):
                 "ready": int(setup.get("ready") or 0),
                 "waiting": int(setup.get("waiting") or 0),
                 "charging": 0,
-                "updated_at": now().isoformat()
+                "updated_at": None
             }
             save_inventory(inv)
 
@@ -1290,7 +1288,7 @@ def start_return_flow(user, chat_id, returned_qty=None):
     - zamyka trasę po potwierdzeniu.
     """
     db = load_db()
-    trip = active_trip(db, user.id)
+    trip = active_trip(db, user.id, user)
 
     if not trip:
         return "Brak aktywnej trasy do rozliczenia."
@@ -1612,7 +1610,7 @@ def handle_driver_flow(text, user, chat_id):
                 return ("Choose: 🟢 OK or 🔴 Cancel", get_confirm_keyboard())
 
             db = load_db()
-            trip = active_trip(db, user.id)
+            trip = active_trip(db, user.id, user)
             if not trip:
                 clear_driver_flow(user.id)
                 return "Brak aktywnej trasy do rozliczenia."
@@ -1699,10 +1697,9 @@ def handle_driver_flow(text, user, chat_id):
 
 
 
-# Reset wizard jest zapisywany do osobnego pliku JSON.
-# Dzięki temu bot nie "gubi" kroku po restarcie Railway/procesu.
-# UWAGA: to NIE jest plik produkcyjny z danymi stanu; właściwe JSON-y są nadpisywane
-# dopiero po komendzie "zatwierdz".
+RESET_WIZARD_FILE = "telegram_reset_wizard.json"
+
+
 def load_reset_wizard():
     return load_json(RESET_WIZARD_FILE, {})
 
@@ -1720,6 +1717,21 @@ def clear_reset_wizard(user_id):
 
 
 def start_reset_wizard(user, chat_id):
+    save_db({"trips": []})
+    save_inventory({
+        "depot_total": 0,
+        "ready": 0,
+        "waiting": 0,
+        "charging": 0,
+        "updated_at": None
+    })
+    save_jobs({"jobs": []})
+    save_driver_checks({})
+    try:
+        save_driver_flow({})
+    except Exception:
+        pass
+
     data = load_reset_wizard()
     data[str(user.id)] = {
         "chat_id": chat_id,
@@ -1735,11 +1747,10 @@ def start_reset_wizard(user, chat_id):
     save_reset_wizard(data)
 
     return (
-        "🔄 RESET ROZPOCZĘTY — dane NIE zostały jeszcze skasowane.\n\n"
-        "Teraz uzupełnimy stan krok po kroku. Zapis nastąpi dopiero po komendzie: zatwierdz\n\n"
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Teraz uzupełnimy dane krok po kroku.\n\n"
         "1/6 Podaj stan DEPO, np.:\n"
-        "504\n\n"
-        "Jeśli bot jest w grupie i nie odpowiada na liczby, odpowiedz liczbą bezpośrednio na tę wiadomość bota albo wyłącz Privacy Mode w BotFather."
+        "504"
     )
 
 
@@ -1791,7 +1802,6 @@ def handle_reset_wizard(text, user, chat_id):
         inv["ready"] = int(wiz.get("ready", 0))
         inv["waiting"] = int(wiz.get("waiting", 0))
         inv["charging"] = int(wiz.get("charging", 0))
-        inv["updated_at"] = now().isoformat()
         save_inventory(inv)
 
         charging = int(wiz.get("charging", 0))
@@ -1815,13 +1825,6 @@ def handle_reset_wizard(text, user, chat_id):
             }]})
         else:
             save_jobs({"jobs": []})
-
-        # Czyścimy stare flow/checki dopiero przy finalnym zatwierdzeniu resetu.
-        save_driver_checks({})
-        try:
-            save_driver_flow({})
-        except Exception:
-            pass
 
         db = {"trips": []}
         for trip in wiz.get("trips", []):
@@ -2080,13 +2083,44 @@ def handle_reset_wizard(text, user, chat_id):
 
 def reset_all_command(text):
     """
-    WYŁĄCZONE CELOWO.
+    Komenda admina:
+    reset
 
-    Stary reset kasował pliki JSON natychmiast po komendzie "reset".
-    Aktualnie reset obsługuje wyłącznie start_reset_wizard() + handle_reset_wizard(),
-    a zapis/czyszczenie danych następuje dopiero po komendzie "zatwierdz".
+    Czyści wszystko:
+    - trasy
+    - magazyn
+    - ładowania
+    - checki kierowców
     """
-    return None
+    t = normalize_text(text).strip()
+
+    if t not in ["reset", "reset wszystko", "reset system"]:
+        return None
+
+    save_db({"trips": []})
+    save_inventory({
+        "depot_total": 0,
+        "ready": 0,
+        "waiting": 0,
+        "charging": 0,
+        "updated_at": None
+    })
+    save_jobs({"jobs": []})
+    save_driver_checks({})
+
+    return (
+        "✅ RESET SYSTEMU ZROBIONY\n\n"
+        "Wyczyszczono:\n"
+        "🚗 trasy\n"
+        "📦 magazyn\n"
+        "🔌 ładowania\n\n"
+        "Teraz wpisz stany i kierowców od nowa, np.:\n"
+        "depo 494\n"
+        "gotowe 77\n"
+        "oczekuje 77\n"
+        "ladowarki 57 start 13:24\n"
+        "Marcin zabrane 55 start 14:52"
+    )
 
 
 def restore_inventory_with_start_command(text, chat_id):
@@ -2357,10 +2391,63 @@ def move_charging_to_ready(qty):
     return moved
 
 
-def active_trip(db, user_id):
+def driver_aliases_for_user(user):
+    """
+    Returns safe aliases for the current Telegram user.
+    Used only as a fallback when an active trip was restored with a manual/old ID.
+    """
+    aliases = set()
+    if not user:
+        return aliases
+
+    uid = str(user.id)
+
+    for item in load_drivers().values():
+        if str(item.get("id", "")) == uid:
+            for value in [
+                item.get("name", ""),
+                item.get("first_name", ""),
+                item.get("full_name", ""),
+                item.get("username", ""),
+                item.get("code", ""),
+                *(item.get("aliases") or []),
+            ]:
+                value = normalize_text(str(value)).strip().lstrip("@")
+                if value:
+                    aliases.add(value)
+
+    # Telegram profile name as a weak fallback, but only if it is not empty.
+    for value in [
+        getattr(user, "full_name", ""),
+        getattr(user, "first_name", ""),
+        getattr(user, "username", ""),
+    ]:
+        value = normalize_text(str(value)).strip().lstrip("@")
+        if value:
+            aliases.add(value)
+
+    return aliases
+
+
+def active_trip(db, user_id, user=None):
+    # 1) Main safe match: exact Telegram ID.
     for trip in reversed(db["trips"]):
-        if trip["user_id"] == str(user_id) and trip.get("end") is None:
+        if str(trip.get("user_id", "")) == str(user_id) and trip.get("end") is None:
             return trip
+
+    # 2) Fallback for restored/manual routes where Telegram ID in trip is wrong.
+    # Match only against known aliases from the driver book/current Telegram profile.
+    aliases = driver_aliases_for_user(user)
+    if aliases:
+        for trip in reversed(db["trips"]):
+            if trip.get("end") is not None:
+                continue
+            driver = normalize_text(str(trip.get("driver", ""))).strip()
+            if not driver:
+                continue
+            if any(alias == driver or alias in driver or driver in alias for alias in aliases):
+                return trip
+
     return None
 
 
@@ -2817,19 +2904,25 @@ def handle_command(text, user, chat_id):
             return "❌ Tylko administrator może dodawać kierowców."
         return add_driver_reply
 
-    # RESET ma ZAWSZE pierwszeństwo.
-    # Ważne: sama komenda reset NIE rusza żadnych głównych JSON-ów.
-    # Odpala tylko kreator w pamięci RAM (USER_STATE). Zapis/czyszczenie JSON następuje dopiero po "zatwierdz".
-    if t in ["reset", "/reset", "reset wszystko", "reset system", "/reset wszystko", "/reset_system"]:
+    # RESET ma ZAWSZE pierwszeństwo, nawet gdy bot jest w środku formularza/wizarda.
+    if t in ["reset", "reset wszystko", "reset system"]:
         if not is_admin(user):
             return "❌ Reset jest tylko dla administratora."
         USER_STATE.pop(user_id, None)
         clear_driver_flow(user_id)
-        return setup_wizard_start(user_id)
+        try:
+            clear_reset_wizard(user_id)
+        except Exception:
+            pass
+        return start_reset_wizard(user, chat_id)
 
     if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
         USER_STATE.pop(user_id, None)
         clear_driver_flow(user_id)
+        try:
+            clear_reset_wizard(user_id)
+        except Exception:
+            pass
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
     # HARD GUARD: when a driver is on RETURN confirmation,
@@ -2845,19 +2938,25 @@ def handle_command(text, user, chat_id):
         if t in ["cancel", "🔴 cancel", "anuluj", "stop"]:
             clear_driver_flow(user.id)
             USER_STATE.pop(user_id, None)
-            return ("❌ Zwrot anulowany.", get_keyboard(user))
+            return ("❌ Return cancelled.", get_keyboard(user))
         return (
-            "⚠️ Potwierdzenie zwrotu nadal jest aktywne.\n\n"
-            "Wybierz: 🟢 OK albo 🔴 Cancel",
+            "⚠️ Return confirmation is still active.\n\n"
+            "Choose: 🟢 OK or 🔴 Cancel",
             get_confirm_keyboard()
         )
 
-    # Kreator resetu działa tylko po komendzie "reset" i jest trzymany w USER_STATE.
-    # Dzięki temu normalne JSON-y działają tak jak wcześniej, a liczby po resecie są przyjmowane.
+    # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
+    # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
+    reset_wizard_reply = handle_reset_wizard(text, user, chat_id)
+    if reset_wizard_reply:
+        return reset_wizard_reply
+
+    # Jeśli stary kreator po resecie jest aktywny, obsłuż go dopiero po reset_wizard.
     setup_reply = setup_wizard_handle(text, user_id, chat_id)
     if setup_reply:
+        if not is_admin(user):
+            return "❌ Kreator resetu jest tylko dla administratora."
         return setup_reply
-
 
     # Pełne komendy admina z czasem działają poza kreatorem.
     if is_admin(user):
@@ -2886,7 +2985,7 @@ def handle_command(text, user, chat_id):
     # OK only confirms an active flow. Without an active confirmation, do nothing.
     # Important: do NOT clear driver_flow here, otherwise incomplete return confirmation breaks.
     if t in ["ok", "🟢 ok"]:
-        return "ℹ️ Nie ma teraz nic do potwierdzenia."
+        return "ℹ️ Nothing to confirm right now."
 
     # Obsługa menu: kliknięty przycisk + następna wiadomość jako liczba/treść.
     if user_id in USER_STATE:
@@ -2929,10 +3028,10 @@ def handle_command(text, user, chat_id):
 
         USER_STATE[user_id] = {"action": button_action}
         labels = {
-            "gotowe": "Podaj aktualną liczbę baterii GOTOWYCH:",
-            "ladowarka": "Podaj aktualną liczbę baterii W ŁADOWARKACH:",
-            "oczekuja": "Podaj aktualną liczbę baterii OCZEKUJĄCYCH:",
-            "depo": "Podaj aktualny stan DEPO:",
+            "gotowe": "Enter current READY batteries:",
+            "ladowarka": "Enter current batteries in CHARGING:",
+            "oczekuja": "Enter current WAITING batteries:",
+            "depo": "Enter current DEPOT TOTAL:",
         }
         return labels[button_action]
 
@@ -2941,7 +3040,7 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Tylko administrator może wysyłać ogłoszenia i alerty."
         USER_STATE[user_id] = {"action": text_action}
-        return "Wpisz treść ogłoszenia:" if text_action == "ogloszenie" else "Wpisz treść alertu:"
+        return "Type announcement text:" if text_action == "ogloszenie" else "Type alert text:"
 
     if t in ["moj id", "moje id"]:
         return f"Twoje Telegram ID: {user_id}"
@@ -2956,6 +3055,12 @@ def handle_command(text, user, chat_id):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
 
+
+    reset_reply = reset_all_command(text)
+    if reset_reply:
+        if not is_admin(user):
+            return "❌ Reset jest tylko dla administratora."
+        return reset_reply
 
     restore_inventory_reply = restore_inventory_with_start_command(text, chat_id)
     if restore_inventory_reply:
@@ -3402,6 +3507,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
