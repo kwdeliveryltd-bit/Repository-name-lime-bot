@@ -55,7 +55,7 @@ DRIVER_ID_BOOK = {
     "3": {
         "id": "7247279842",
         "name": "Michał P",
-        "aliases": ["3", "michal p", "md"]
+        "aliases": ["3", "michal p", "michal pietrzak", "michal kierowca od dobosza", "md"]
     },
     "4": {
         "id": "8006256107",
@@ -933,8 +933,8 @@ def setup_wizard_start(user_id):
     }
 
     return (
-        "✅ RESET SYSTEMU ZROBIONY\n\n"
-        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "⚠️ RESET WIZARD URUCHOMIONY\n\n"
+        "Dane NIE są jeszcze wyczyszczone. Zapis nastąpi dopiero po OK/zatwierdz na końcu.\n\n"
         "1️⃣ Podaj stan DEPO, np.:\n"
         "494"
     )
@@ -1717,20 +1717,12 @@ def clear_reset_wizard(user_id):
 
 
 def start_reset_wizard(user, chat_id):
-    save_db({"trips": []})
-    save_inventory({
-        "depot_total": 0,
-        "ready": 0,
-        "waiting": 0,
-        "charging": 0,
-        "updated_at": None
-    })
-    save_jobs({"jobs": []})
-    save_driver_checks({})
-    try:
-        save_driver_flow({})
-    except Exception:
-        pass
+    # SAFE RESET WIZARD:
+    # Nie czyścimy JSON-ów na starcie. Dane zostają nietknięte,
+    # dopóki admin nie przejdzie całego kreatora i nie kliknie/wpisze OK.
+    # Dzięki temu Cancel nie kasuje działającego systemu.
+    USER_STATE.pop(str(user.id), None)
+    clear_driver_flow(user.id)
 
     data = load_reset_wizard()
     data[str(user.id)] = {
@@ -1747,8 +1739,8 @@ def start_reset_wizard(user, chat_id):
     save_reset_wizard(data)
 
     return (
-        "✅ RESET SYSTEMU ZROBIONY\n\n"
-        "Teraz uzupełnimy dane krok po kroku.\n\n"
+        "⚠️ RESET WIZARD URUCHOMIONY\n\n"
+        "Dane NIE są jeszcze wyczyszczone. Zapis nastąpi dopiero po OK/zatwierdz na końcu.\n\n"
         "1/6 Podaj stan DEPO, np.:\n"
         "504"
     )
@@ -2434,56 +2426,57 @@ def active_trip(db, user_id, user=None):
     Finds an active route safely.
 
     1) Exact Telegram ID is always preferred.
-    2) Fallback by driver aliases is allowed only when it is unique.
-       This prevents one Michał from being matched to another Michał.
+    2) Fallback by driver aliases is used only for manual/restored routes.
+       It does NOT match by a single common token like "michal", because that
+       can attach the wrong route when there are two drivers with similar names.
     """
     user_id = str(user_id)
 
-    active = [trip for trip in reversed(db.get("trips", [])) if trip.get("end") is None]
-
     # 1) Main safe match: exact Telegram ID.
-    for trip in active:
-        if str(trip.get("user_id", "")) == user_id:
+    for trip in reversed(db["trips"]):
+        if trip.get("end") is None and str(trip.get("user_id", "")) == user_id:
             return trip
 
+    # 2) Safe fallback for restored/manual routes where Telegram ID in trip is wrong.
     aliases = driver_aliases_for_user(user)
-    clean_aliases = {a for a in aliases if a and len(a) >= 2}
-    if not clean_aliases:
-        return None
+    if aliases:
+        clean_aliases = {
+            normalize_text(str(a)).strip().lstrip("@")
+            for a in aliases
+            if a and len(normalize_text(str(a)).strip()) >= 3
+        }
 
-    # 2) Strong alias match: exact/contains. Return only if unique.
-    strong_matches = []
-    for trip in active:
-        driver = normalize_text(str(trip.get("driver", ""))).strip()
-        if not driver:
-            continue
-        if any(alias == driver or alias in driver or driver in alias for alias in clean_aliases):
-            strong_matches.append(trip)
+        matches = []
+        for trip in reversed(db["trips"]):
+            if trip.get("end") is not None:
+                continue
 
-    if len(strong_matches) == 1:
-        return strong_matches[0]
-    if len(strong_matches) > 1:
-        return None
+            driver = normalize_text(str(trip.get("driver", ""))).strip()
+            if not driver:
+                continue
 
-    # 3) Weak token fallback only if it uniquely identifies one active route.
-    weak_matches = []
-    for trip in active:
-        driver = normalize_text(str(trip.get("driver", ""))).strip()
-        driver_tokens = {x for x in re.split(r"\s+", driver) if len(x) >= 4}
-        if not driver_tokens:
-            continue
+            matched = False
+            for alias in clean_aliases:
+                # exact alias/name match
+                if alias == driver:
+                    matched = True
+                    break
 
-        for alias in clean_aliases:
-            alias_tokens = {x for x in re.split(r"\s+", alias) if len(x) >= 4}
-            if driver_tokens.intersection(alias_tokens):
-                weak_matches.append(trip)
-                break
+                # contains match only for longer, specific names
+                # e.g. "michal kierowca od dobosza" <-> "michal pietrzak" will NOT match
+                # unless that exact alias was added in DRIVER_ID_BOOK.
+                if len(alias) >= 6 and len(driver) >= 6 and (alias in driver or driver in alias):
+                    matched = True
+                    break
 
-    if len(weak_matches) == 1:
-        return weak_matches[0]
+            if matched:
+                matches.append(trip)
+
+        # Only return fallback if it is unambiguous.
+        if len(matches) == 1:
+            return matches[0]
 
     return None
-
 
 def calc_trip(start_iso, qty):
     start = datetime.fromisoformat(start_iso)
@@ -2951,12 +2944,13 @@ def handle_command(text, user, chat_id):
         return start_reset_wizard(user, chat_id)
 
     if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
+        # Cancel ma czyścić tylko aktywny lokalny kreator użytkownika.
+        # Nie rusza bazy JSON i nie czyści reset wizarda globalnie poza jego własną obsługą.
         USER_STATE.pop(user_id, None)
         clear_driver_flow(user_id)
-        try:
+        if load_reset_wizard().get(user_id) and is_admin(user):
             clear_reset_wizard(user_id)
-        except Exception:
-            pass
+            return "❌ Reset wizard przerwany. Dane systemu NIE zostały wyczyszczone."
         return "❌ Przerwano aktualny kreator. Możesz zacząć od nowa."
 
     # HARD PRIORITY: these commands must work even if an old wizard/USER_STATE is stuck.
@@ -3565,6 +3559,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
