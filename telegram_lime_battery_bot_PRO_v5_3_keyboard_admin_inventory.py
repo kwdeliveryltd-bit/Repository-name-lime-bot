@@ -603,34 +603,22 @@ def is_admin(user):
 def get_keyboard(user=None, chat=None):
     """Main Telegram keyboard.
 
-    Drivers see only operational buttons.
-    Admin buttons are shown only to admins in a private chat with the bot.
+    Everyone sees only the safe driver panel.
+    Admin tools stay available by typed commands only.
     """
 
     base = [
         ["Pickup", "Return"],
-        ["Ready", "Charging", "Waiting"],
-        ["Help"],
-        ["🟢 OK", "🔴 Cancel"],
+        ["🟢 OK"],
     ]
-
-    chat_type = getattr(chat, "type", None)
-    is_private_chat = chat_type == "private"
-
-    if user is not None and is_admin(user) and is_private_chat:
-        base += [
-            ["Status", "Routes"],
-            ["Drivers", "Numbers"],
-            ["Depot", "Announcement", "Alert"],
-        ]
 
     return ReplyKeyboardMarkup(base, resize_keyboard=True, one_time_keyboard=False)
 
 
 def get_confirm_keyboard():
-    """Klawiatura potwierdzenia dla flow: Zabrane / Oddane."""
+    """Confirmation keyboard for Pickup / Return."""
     return ReplyKeyboardMarkup(
-        [["🟢 OK", "🔴 Cancel"]],
+        [["🟢 OK"]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
@@ -3067,8 +3055,9 @@ def handle_command(text, user, chat_id):
 
     button_action = BUTTON_ACTIONS.get(t)
     if button_action:
-        if button_action in ["depo"] and not is_admin(user):
-            return "❌ Depo jest tylko dla administratora."
+        if button_action in ["gotowe", "ladowarka", "oczekuja", "depo"] and not is_admin(user):
+            return "❌ Ta komenda jest tylko dla administratora."
+
 
         if button_action == "zabrane":
             USER_STATE.pop(user_id, None)
@@ -3559,6 +3548,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
