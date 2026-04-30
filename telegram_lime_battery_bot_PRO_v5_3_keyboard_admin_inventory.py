@@ -1239,6 +1239,28 @@ def charger_free_slots():
     return max(0, CHARGER_CAPACITY - charging)
 
 
+def auto_move_waiting_to_chargers(chat_id):
+    """
+    Automatycznie przenosi baterie z OCZEKUJĄCYCH do wolnych miejsc w ŁADOWARKACH.
+    Nie zmienia sumy depo — tylko przesuwa: waiting -> charging i zakłada nowy timer ładowania.
+    """
+    inv = load_inventory()
+    waiting = int(inv.get("waiting", 0))
+    charging = int(inv.get("charging", 0))
+    free = max(0, CHARGER_CAPACITY - charging)
+
+    move_qty = min(waiting, free)
+    if move_qty <= 0:
+        return 0
+
+    inv["waiting"] = waiting - move_qty
+    inv["charging"] = charging + move_qty
+    save_inventory(inv)
+
+    add_charging_job_from_return(chat_id, move_qty)
+    return move_qty
+
+
 def add_charging_job_from_return(chat_id, qty):
     qty = int(qty)
     if qty <= 0:
@@ -1664,8 +1686,17 @@ def handle_driver_flow(text, user, chat_id):
             if to_charging > 0:
                 add_charging_job_from_return(chat_id, to_charging)
 
+            # Po zwrocie, jeśli zostało wolne miejsce w ładowarkach,
+            # automatycznie przenieś oczekujące baterie do ładowania.
+            auto_moved_to_charging = auto_move_waiting_to_chargers(chat_id)
+
             clear_driver_flow(user.id)
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
+
+            auto_move_line = (
+                f"Automatycznie z oczekujących do ładowarek: {auto_moved_to_charging}\n"
+                if auto_moved_to_charging > 0 else ""
+            )
 
             return (
                 f"✅ ZWROT ZAPISANY\n\n"
@@ -1674,7 +1705,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"Do ładowarek: {to_charging}\n"
                 f"Oczekujące: {to_waiting}\n"
                 f"Do gotowych z niewykonanej reszty: {ready_from_remaining}\n"
-
+                f"{auto_move_line}"
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
                 f"Zarobek za oddane: £{earned:.2f}\n\n"
@@ -3548,6 +3579,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
