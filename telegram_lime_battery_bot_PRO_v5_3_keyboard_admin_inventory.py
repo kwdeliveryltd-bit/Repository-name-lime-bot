@@ -1544,8 +1544,8 @@ def handle_driver_flow(text, user, chat_id):
         clear_driver_flow(user.id)
         return "⚠️ Kreator pobrania się zaciął. Wpisz Zabrane jeszcze raz."
 
-    # FLOW: automatyczna kontrola zwrotu — opcja B
-       if flow.get("type") == "return_auto":
+       # FLOW: automatyczna kontrola zwrotu — opcja B
+    if flow.get("type") == "return_auto":
         route_qty = int(flow.get("route_qty", 0))
 
         if flow["step"] == "returned_qty":
@@ -1556,24 +1556,19 @@ def handle_driver_flow(text, user, chat_id):
 
             flow["returned"] = qty
             flow["step"] = "ready_returned"
-
             data[key] = flow
             save_driver_flow(data)
 
             return (
                 f"✅ Oddane razem: {qty}\n\n"
-                "2/3 Ile z oddanych baterii jest GOTOWYCH?\n\n"
-                "Przykład:\n"
-                "Pobrałeś 50, oddajesz 50, gotowe są 3 → wpisz 3."
+                "2/3 Ile z oddanych baterii jest GOTOWYCH?"
             )
 
         if flow["step"] == "ready_returned":
             returned = int(flow.get("returned", 0))
 
-            if qty < 0:
-                return "Liczba nie może być ujemna."
             if qty > returned:
-                return f"❌ Gotowych nie może być więcej niż oddanych. Oddane razem: {returned}."
+                return f"❌ Gotowych nie może być więcej niż oddanych. Oddane: {returned}."
 
             ready_returned = qty
             used_returned = returned - ready_returned
@@ -1581,46 +1576,36 @@ def handle_driver_flow(text, user, chat_id):
             free = charger_free_slots()
             to_charging = min(used_returned, free)
             to_waiting = used_returned - to_charging
-            missing = route_qty - returned
 
             flow["ready_returned"] = ready_returned
             flow["used_returned"] = used_returned
             flow["to_charging"] = to_charging
             flow["to_waiting"] = to_waiting
-            flow["missing_to_ready"] = 0
-            flow["next_action"] = "finish"
-            flow["take_extra"] = 0
             flow["step"] = "confirm_return_auto"
 
             data[key] = flow
             save_driver_flow(data)
 
-            missing_line = f"\n⚠️ Brakuje do pełnego zwrotu: {missing}\n" if missing > 0 else ""
-
             return (
                 (
-                    "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
-                    f"Pobrane na trasę: {route_qty}\n"
+                    f"📊 PODSUMOWANIE ZWROTU\n\n"
+                    f"Pobrane: {route_qty}\n"
                     f"Oddane razem: {returned}\n"
-                    f"📦 Gotowe przywiezione: {ready_returned}\n"
-                    f"🔋 Do ładowania/oczekujące: {used_returned}\n"
-                    f"🔌 Wolne miejsca w ładowarkach: {free}\n"
-                    f"➡️ Do ładowarek: {to_charging}\n"
-                    f"➡️ Oczekujące: {to_waiting}\n"
-                    f"{missing_line}\n"
-                    "3/3 Wybierz opcję:"
+                    f"Gotowe: {ready_returned}\n"
+                    f"Do ładowarek: {to_charging}\n"
+                    f"Oczekujące: {to_waiting}\n\n"
+                    "3/3 Potwierdź:"
                 ),
                 get_confirm_keyboard()
             )
 
         if flow["step"] == "confirm_return_auto":
             if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
-                data[key] = flow
-                save_driver_flow(data)
-                return ("Choose: 🟢 OK or 🔴 Cancel", get_confirm_keyboard())
+                return ("Kliknij 🟢 OK", get_confirm_keyboard())
 
             db = load_db()
             trip = active_trip(db, user.id, user)
+
             if not trip:
                 clear_driver_flow(user.id)
                 return "Brak aktywnej trasy do rozliczenia."
@@ -1631,22 +1616,6 @@ def handle_driver_flow(text, user, chat_id):
             used_returned = int(flow.get("used_returned", returned - ready_returned))
             to_charging = int(flow.get("to_charging", 0))
             to_waiting = int(flow.get("to_waiting", 0))
-            take_extra = int(flow.get("take_extra", 0))
-
-            if returned > original_qty:
-                clear_driver_flow(user.id)
-                return f"❌ Oddane ({returned}) nie może być większe niż trasa ({original_qty}). Zacznij zwrot od nowa."
-
-            if ready_returned > returned:
-                clear_driver_flow(user.id)
-                return "❌ Gotowe nie mogą być większe niż oddane. Zacznij zwrot od nowa."
-
-            free = charger_free_slots()
-            if to_charging > free:
-                clear_driver_flow(user.id)
-                return f"❌ W międzyczasie zmieniły się ładowarki. Wolne miejsca: {free}. Zacznij zwrot od nowa."
-
-            inv = load_inventory()
 
             end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
 
@@ -1663,9 +1632,10 @@ def handle_driver_flow(text, user, chat_id):
 
             save_db(db)
 
+            inv = load_inventory()
+            inv["ready"] = int(inv.get("ready", 0)) + ready_returned
             inv["charging"] = int(inv.get("charging", 0)) + to_charging
             inv["waiting"] = int(inv.get("waiting", 0)) + to_waiting
-            inv["ready"] = int(inv.get("ready", 0)) + ready_returned - take_extra
             save_inventory(inv)
 
             if to_charging > 0:
@@ -1674,6 +1644,7 @@ def handle_driver_flow(text, user, chat_id):
             auto_moved_to_charging = auto_move_waiting_to_chargers(chat_id)
 
             clear_driver_flow(user.id)
+
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
 
             auto_move_line = (
@@ -1697,7 +1668,6 @@ def handle_driver_flow(text, user, chat_id):
             )
 
     return None
-
 
 
 RESET_WIZARD_FILE = "telegram_reset_wizard.json"
