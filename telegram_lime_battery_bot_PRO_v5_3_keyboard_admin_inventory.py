@@ -1288,15 +1288,6 @@ def add_charging_job_from_return(chat_id, qty):
 
 
 def start_return_flow(user, chat_id, returned_qty=None):
-    """
-    Opcja B — automatyczna kontrola zwrotu.
-    Kierowca podaje tylko ile oddaje.
-    Bot sam liczy:
-    - ile zmieści się do ładowarek,
-    - resztę daje w oczekujące,
-    - jeśli odda mniej niż pobrał, pyta czy brakującą resztę dodać do gotowych,
-    - zamyka trasę po potwierdzeniu.
-    """
     db = load_db()
     trip = active_trip(db, user.id, user)
 
@@ -1316,20 +1307,21 @@ def start_return_flow(user, chat_id, returned_qty=None):
         "created_at": now().isoformat(),
         "route_qty": route_qty,
         "returned": None,
+        "ready_returned": 0,
+        "used_returned": 0,
         "to_charging": 0,
         "to_waiting": 0,
         "take_extra": 0,
-        "next_action": None,
+        "next_action": "finish",
     }
     save_driver_flow(data)
 
     return (
         f"🔁 KONTROLA ZWROTU\n\n"
         f"Masz w trasie: {route_qty} baterii.\n\n"
-        "1/3 Ile baterii oddajesz TERAZ?\n"
-        "Bot sam rozdzieli: ładowarki / oczekujące."
+        "1/3 Ile baterii oddajesz RAZEM?\n"
+        "Potem podasz, ile z nich jest GOTOWYCH."
     )
-
 
 def number_from_text(text):
     match = re.search(r"\d+", text or "")
@@ -1371,13 +1363,14 @@ def handle_driver_flow(text, user, chat_id):
 
     # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
     # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
-    numeric_steps = {
-        ("pickup", "ready"),
-        ("pickup", "charging"),
-        ("pickup", "waiting"),
-        ("pickup", "take_qty"),
-        ("return_auto", "returned_qty"),
-    }
+numeric_steps = {
+    ("pickup", "ready"),
+    ("pickup", "charging"),
+    ("pickup", "waiting"),
+    ("pickup", "take_qty"),
+    ("return_auto", "returned_qty"),
+    ("return_auto", "ready_returned"),
+}
 
     if (flow.get("type"), flow.get("step")) in numeric_steps:
         if qty is None:
