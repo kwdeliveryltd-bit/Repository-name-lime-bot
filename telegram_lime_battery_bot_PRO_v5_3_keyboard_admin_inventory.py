@@ -1363,7 +1363,7 @@ def handle_driver_flow(text, user, chat_id):
 
     # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
     # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
-numeric_steps = {
+    numeric_steps = {
     ("pickup", "ready"),
     ("pickup", "charging"),
     ("pickup", "waiting"),
