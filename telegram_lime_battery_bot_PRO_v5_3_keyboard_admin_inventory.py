@@ -22,6 +22,7 @@ DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
+AUDIT_FILE = "telegram_audit_log.json"
 
 FILE_LOCK = threading.RLock()
 
@@ -616,11 +617,60 @@ def get_keyboard(user=None, chat=None):
 
 
 def get_confirm_keyboard():
-    """Confirmation keyboard for Pickup / Return."""
+    """Confirmation keyboard for Pickup / Return.
+
+    Enterprise-safe:
+    - OK zapisuje aktualne wyliczenie,
+    - Edit wraca do poprawiania danych,
+    - Cancel przerywa cały flow.
+    """
     return ReplyKeyboardMarkup(
-        [["🟢 OK"]],
+        [["🟢 OK"], ["✏️ Edit"], ["🔴 Cancel"]],
         resize_keyboard=True,
         one_time_keyboard=True
+    )
+
+
+def is_ok_text(t):
+    return t in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]
+
+
+def is_edit_text(t):
+    return t in ["edit", "edytuj", "popraw", "popraw dane", "✏️ edit", "✏️ edytuj"]
+
+
+def is_cancel_text(t):
+    return t in ["anuluj", "cancel", "🔴 cancel", "stop"]
+
+
+def audit_log(event_type, user=None, chat_id=None, details=None):
+    """Prosty audit trail do diagnozy rozjazdów człowiek ↔ stan bota."""
+    try:
+        data = load_json(AUDIT_FILE, {"events": []})
+        events = data.setdefault("events", [])
+        events.append({
+            "time": now().isoformat(),
+            "event": event_type,
+            "user_id": str(getattr(user, "id", "")) if user else "",
+            "user_name": get_driver_name(user) if user else "",
+            "chat_id": chat_id,
+            "details": details or {},
+        })
+        # Nie pozwalamy, żeby plik rósł bez końca.
+        data["events"] = events[-5000:]
+        save_json(AUDIT_FILE, data)
+    except Exception:
+        # Audit nie może zatrzymać pracy operacyjnej bota.
+        pass
+
+
+def confirmation_block_message():
+    return (
+        "❌ Nie zapisuję tej wiadomości jako poprawki, bo jesteś na kroku POTWIERDZENIA.\n\n"
+        "Żeby uniknąć rozjazdu stanów, po takiej wiadomości blokuję 🟢 OK.\n\n"
+        "Kliknij:\n"
+        "✏️ Edit — popraw dane\n"
+        "🔴 Cancel — przerwij i zacznij od nowa"
     )
 
 
@@ -1355,7 +1405,8 @@ def handle_driver_flow(text, user, chat_id):
     if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
         return drivers_list_text()
 
-    if t in ["anuluj", "cancel", "🔴 cancel", "stop"]:
+    if is_cancel_text(t):
+        audit_log("flow_cancelled", user, chat_id, {"flow": flow})
         clear_driver_flow(user.id)
         return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
 
@@ -1454,8 +1505,29 @@ def handle_driver_flow(text, user, chat_id):
             )
 
         if flow["step"] == "confirm_take":
-            if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
-                return ("Choose: 🟢 OK or 🔴 Cancel", get_confirm_keyboard())
+            if is_edit_text(t):
+                flow["confirm_blocked"] = False
+                flow["step"] = "take_qty"
+                data[key] = flow
+                save_driver_flow(data)
+                audit_log("pickup_confirm_edit", user, chat_id, {"flow": flow})
+                return "✏️ OK, poprawiamy. Ile baterii ZABIERASZ?"
+
+            if not is_ok_text(t):
+                flow["confirm_blocked"] = True
+                flow["blocked_reason"] = text
+                data[key] = flow
+                save_driver_flow(data)
+                audit_log("pickup_confirm_blocked_by_text", user, chat_id, {"message": text, "flow": flow})
+                return (confirmation_block_message(), get_confirm_keyboard())
+
+            if flow.get("confirm_blocked"):
+                audit_log("pickup_ok_rejected_after_invalid_text", user, chat_id, {"flow": flow})
+                return (
+                    "🚫 OK jest zablokowane, bo po podsumowaniu wpisano dodatkową wiadomość.\n\n"
+                    "Kliknij ✏️ Edit, żeby poprawić, albo 🔴 Cancel, żeby zacząć od nowa.",
+                    get_confirm_keyboard()
+                )
 
             qty_take = int(flow.get("qty", 0))
             if qty_take < 1:
@@ -1600,11 +1672,47 @@ def handle_driver_flow(text, user, chat_id):
             )
 
         if flow["step"] == "confirm_return_auto":
-            if t not in ["zatwierdz", "zatwierdź", "ok", "🟢 ok", "potwierdz", "potwierdź"]:
-                return ("Kliknij 🟢 OK", get_confirm_keyboard())
+            if is_edit_text(t):
+                flow["confirm_blocked"] = False
+                flow["step"] = "ready_returned"
+                data[key] = flow
+                save_driver_flow(data)
+                audit_log("return_confirm_edit", user, chat_id, {"flow": flow})
+                returned = int(flow.get("returned", 0))
+                return (
+                    "✏️ OK, poprawiamy zwrot.\n\n"
+                    f"Oddane razem zostaje: {returned}\n"
+                    "Podaj jeszcze raz: ile z oddanych baterii jest GOTOWYCH?"
+                )
 
-            db = load_db()
-            trip = active_trip(db, user.id, user)
+            if not is_ok_text(t):
+                flow["confirm_blocked"] = True
+                flow["blocked_reason"] = text
+                data[key] = flow
+                save_driver_flow(data)
+                audit_log("return_confirm_blocked_by_text", user, chat_id, {
+                    "message": text,
+                    "computed": {
+                        "returned": flow.get("returned"),
+                        "ready_returned": flow.get("ready_returned"),
+                        "to_charging": flow.get("to_charging"),
+                        "to_waiting": flow.get("to_waiting"),
+                    },
+                    "flow": flow
+                })
+                return (confirmation_block_message(), get_confirm_keyboard())
+
+            if flow.get("confirm_blocked"):
+                audit_log("return_ok_rejected_after_invalid_text", user, chat_id, {"flow": flow})
+                return (
+                    "🚫 OK jest zablokowane, bo po podsumowaniu wpisano dodatkową wiadomość.\n\n"
+                    "Kliknij ✏️ Edit, żeby poprawić, albo 🔴 Cancel, żeby zacząć od nowa.",
+                    get_confirm_keyboard()
+                )
+
+            with FILE_LOCK:
+                db = load_db()
+                trip = active_trip(db, user.id, user)
 
             if not trip:
                 clear_driver_flow(user.id)
@@ -2950,25 +3058,35 @@ def handle_command(text, user, chat_id):
             return "❌ Lista kierowców jest tylko dla administratora."
         return drivers_list_text()
 
-    # HARD GUARD: when a driver is on RETURN confirmation,
-    # other menu buttons like Waiting/Ready/Charging must NOT overwrite the flow.
+    if t in ["audit", "audyt", "log", "audit log"]:
+        if not is_admin(user):
+            return "❌ Audit log jest tylko dla administratora."
+        data_audit = load_json(AUDIT_FILE, {"events": []})
+        events = data_audit.get("events", [])[-20:]
+        if not events:
+            return "📋 AUDIT LOG\n\nBrak zdarzeń."
+        lines = ["📋 AUDIT LOG — ostatnie 20 zdarzeń", ""]
+        for ev in events:
+            who = ev.get("user_name") or ev.get("user_id") or "unknown"
+            event = ev.get("event", "")
+            tm = ev.get("time", "")[11:19]
+            details = ev.get("details") or {}
+            msg = details.get("message") or details.get("blocked_reason") or ""
+            if len(str(msg)) > 60:
+                msg = str(msg)[:57] + "..."
+            lines.append(f"• {tm} | {who} | {event}" + (f" | {msg}" if msg else ""))
+        return "\n".join(lines)
+
+    # HARD GUARD ENTERPRISE:
+    # Jeżeli użytkownik jest na ekranie potwierdzenia, KAŻDA wiadomość idzie do flow.
+    # Dzięki temu tekst typu "Do ładowarek: 0" blokuje OK i trafia do audit logu,
+    # zamiast zostać zignorowanym przez menu/komendy.
     active_flow = load_driver_flow().get(user_id)
     if (
         active_flow
-        and active_flow.get("type") == "return_auto"
-        and active_flow.get("step") == "confirm_return_auto"
+        and active_flow.get("step") in ["confirm_return_auto", "confirm_take"]
     ):
-        if t in ["ok", "🟢 ok", "zatwierdz", "zatwierdź", "potwierdz", "potwierdź"]:
-            return handle_driver_flow("ok", user, chat_id)
-        if t in ["cancel", "🔴 cancel", "anuluj", "stop"]:
-            clear_driver_flow(user.id)
-            USER_STATE.pop(user_id, None)
-            return ("❌ Return cancelled.", get_keyboard(user))
-        return (
-            "⚠️ Return confirmation is still active.\n\n"
-            "Choose: 🟢 OK or 🔴 Cancel",
-            get_confirm_keyboard()
-        )
+        return handle_driver_flow(text, user, chat_id)
 
     # Kreator resetu musi mieć pierwszeństwo przed USER_STATE i zwykłymi komendami.
     # To naprawia zatrzymanie po wpisaniu oczekujących w kroku 5/6.
@@ -3533,6 +3651,42 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
