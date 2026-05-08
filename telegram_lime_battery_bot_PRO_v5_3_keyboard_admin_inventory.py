@@ -50,13 +50,13 @@ DRIVER_ID_BOOK = {
     },
     "2": {
         "id": "6651434498",
-        "name": "Michał S",
-        "aliases": ["2", "michal s", "ml"]
+        "name": "Michał Surmacz",
+        "aliases": ["2", "surmacz", "michal surmacz", "michal s", "ms"]
     },
     "3": {
         "id": "7247279842",
-        "name": "Michał P",
-        "aliases": ["3", "michal p", "michal pietrzak", "michal kierowca od dobosza", "md"]
+        "name": "Pietrzak",
+        "aliases": ["3", "pietrzak", "michal pietrzak", "michal p", "mp"]
     },
     "4": {
         "id": "8006256107",
@@ -366,6 +366,12 @@ def driver_search(query):
     if not q:
         return []
 
+    # Safety guard: two drivers have the same first name.
+    # Plain "michal" is ambiguous, so require a surname/code/alias:
+    # "pietrzak", "surmacz", "michal p", "michal s", "2", or "3".
+    if q in {"michal", "michał"}:
+        return []
+
     results = []
     drivers = load_drivers()
 
@@ -443,6 +449,11 @@ def create_restored_trip(driver_name, user_id, chat_id, start_time, qty, manual=
     db = load_db()
     wanted = normalize_text(driver_name)
 
+    # IMPORTANT:
+    # Do NOT remove active trips by fuzzy/contains name matching.
+    # Example: "Michal" / "Michal P" / "Michal S" can match the wrong driver.
+    # We only replace an active route when Telegram ID is the same, or the full
+    # normalized display name is exactly the same.
     db["trips"] = [
         trip for trip in db["trips"]
         if not (
@@ -450,8 +461,6 @@ def create_restored_trip(driver_name, user_id, chat_id, start_time, qty, manual=
             and (
                 str(trip.get("user_id", "")) == str(user_id)
                 or normalize_text(trip.get("driver", "")) == wanted
-                or wanted in normalize_text(trip.get("driver", ""))
-                or normalize_text(trip.get("driver", "")) in wanted
             )
         )
     ]
@@ -1725,7 +1734,14 @@ def handle_driver_flow(text, user, chat_id):
             to_charging = int(flow.get("to_charging", 0))
             to_waiting = int(flow.get("to_waiting", 0))
 
-            end_time, hours, late_hours, rate, earned = calc_trip(trip["start"], returned)
+            payment = calc_trip_payment(trip["start"], original_qty, ready_returned)
+            end_time = payment["end"]
+            hours = payment["hours"]
+            late_hours = payment["late_hours"]
+            penalty_steps = payment["penalty_steps"]
+            gross_ready_earned = payment["gross_ready_earned"]
+            time_penalty = payment["time_penalty"]
+            earned = payment["earned"]
 
             trip["end"] = end_time.isoformat()
             trip["returned"] = returned
@@ -1734,9 +1750,14 @@ def handle_driver_flow(text, user, chat_id):
             trip["charged_inside"] = ready_returned
             trip["hours"] = hours
             trip["late_hours"] = late_hours
-            trip["rate"] = rate
+            trip["penalty_steps"] = penalty_steps
+            trip["gross_ready_earned"] = gross_ready_earned
+            trip["time_penalty"] = time_penalty
+            trip["paid_qty"] = ready_returned
+            trip["rate"] = BASE_RATE
             trip["earned"] = earned
             trip["return_auto"] = True
+            trip["payment_logic"] = "ready_minus_time_penalty_from_route_qty_v2"
 
             save_db(db)
 
@@ -1771,7 +1792,9 @@ def handle_driver_flow(text, user, chat_id):
                 f"{auto_move_line}"
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
-                f"Zarobek za oddane: £{earned:.2f}\n\n"
+                f"Zarobek za gotowe ({ready_returned} × £{BASE_RATE:.2f}): £{gross_ready_earned:.2f}\n"
+                f"Kara czasowa ({original_qty} × £{PENALTY_PER_HOUR:.2f} × {penalty_steps}h): -£{time_penalty:.2f}\n"
+                f"Do wypłaty: £{earned:.2f}\n\n"
                 f"{status_report()}"
             )
 
@@ -2560,6 +2583,11 @@ def active_trip(db, user_id, user=None):
     return None
 
 def calc_trip(start_iso, qty):
+    """
+    Stara funkcja zostaje dla kompatybilności raportów / starszych rekordów.
+    UWAGA: dla nowych zwrotów używamy calc_trip_payment(), bo wypłata
+    jest liczona za GOTOWE, a kara czasowa od CAŁEJ trasy.
+    """
     start = datetime.fromisoformat(start_iso)
     end = now()
     hours = (end - start).total_seconds() / 3600
@@ -2569,6 +2597,46 @@ def calc_trip(start_iso, qty):
     rate = max(MIN_RATE, BASE_RATE - (penalty_steps * PENALTY_PER_HOUR))
     earned = qty * rate
     return end, hours, late_hours, rate, earned
+
+
+def calc_trip_payment(start_iso, route_qty, ready_returned):
+    """
+    NOWA LOGIKA WYPŁATY:
+
+    - zarobek bazowy: tylko GOTOWE przywiezione baterie × BASE_RATE
+    - kara czasowa: CAŁA trasa / pobrane baterie × PENALTY_PER_HOUR × rozpoczęte godziny spóźnienia
+    - do wypłaty: max(0, zarobek bazowy - kara czasowa)
+
+    Przykład:
+    Pobrane 40, gotowe 10, spóźnienie 2h:
+    10 × £2.00 - 40 × £0.10 × 2 = £12.00
+    """
+    start = datetime.fromisoformat(start_iso)
+    end = now()
+    hours = (end - start).total_seconds() / 3600
+
+    route_qty = int(route_qty)
+    ready_returned = int(ready_returned)
+
+    limit_hours = trip_time_limit_hours(route_qty)
+    late_hours = max(0, hours - limit_hours)
+    penalty_steps = math.ceil(late_hours) if late_hours > 0 else 0
+
+    gross_ready_earned = ready_returned * BASE_RATE
+    time_penalty = route_qty * PENALTY_PER_HOUR * penalty_steps
+    earned = max(0.0, gross_ready_earned - time_penalty)
+
+    return {
+        "end": end,
+        "hours": hours,
+        "late_hours": late_hours,
+        "penalty_steps": penalty_steps,
+        "gross_ready_earned": gross_ready_earned,
+        "time_penalty": time_penalty,
+        "earned": earned,
+        "paid_qty": ready_returned,
+        "route_qty": route_qty,
+    }
 
 
 def active_trips_text():
@@ -3651,6 +3719,42 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
