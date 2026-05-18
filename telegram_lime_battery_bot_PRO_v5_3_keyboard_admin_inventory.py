@@ -129,7 +129,8 @@ MIN_RATE = 1.00
 CHARGE_TIME_HOURS = 4.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
-CHARGER_CAPACITY = 133  # maksymalna liczba baterii w ładowarkach
+DEFAULT_CHARGER_SLOTS = 133  # domyślna liczba portów ładowania
+CHARGER_CAPACITY = DEFAULT_CHARGER_SLOTS  # fallback dla starych fragmentów kodu
 
 
 def now():
@@ -1197,7 +1198,7 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     inv_before = load_inventory()
     waiting_before = int(inv_before.get("waiting", 0))
     charging_before = int(inv_before.get("charging", 0))
-    free_before = max(0, CHARGER_CAPACITY - charging_before)
+    free_before = max(0, get_charger_slots() - charging_before)
 
     moved_to_charging = auto_move_waiting_to_chargers(chat_id)
 
@@ -1344,7 +1345,7 @@ def get_charger_slots():
 def charger_free_slots():
     inv = load_inventory()
     charging = int(inv.get("charging", 0))
-    return max(0, CHARGER_CAPACITY - charging)
+    return max(0, get_charger_slots() - charging)
 
 
 def auto_move_waiting_to_chargers(chat_id):
@@ -1355,7 +1356,7 @@ def auto_move_waiting_to_chargers(chat_id):
     inv = load_inventory()
     waiting = int(inv.get("waiting", 0))
     charging = int(inv.get("charging", 0))
-    free = max(0, CHARGER_CAPACITY - charging)
+    free = max(0, get_charger_slots() - charging)
 
     move_qty = min(waiting, free)
     if move_qty <= 0:
@@ -1509,8 +1510,8 @@ def handle_driver_flow(text, user, chat_id):
             )
 
         if flow["step"] == "charging":
-            if qty > CHARGER_CAPACITY:
-                return f"❌ Ładowarki mają limit {CHARGER_CAPACITY}. Wpisz poprawną liczbę."
+            if qty > get_charger_slots():
+                return f"❌ Ładowarki mają limit {get_charger_slots()}. Wpisz poprawną liczbę."
 
             expected = int(inv.get("charging", 0))
             if qty != expected:
@@ -2052,8 +2053,8 @@ def handle_reset_wizard(text, user, chat_id):
             return "Podaj samą liczbę baterii w ładowarkach, np. 133"
         if qty < 0:
             return "Liczba nie może być ujemna."
-        if qty > CHARGER_CAPACITY:
-            return f"❌ Ładowarki mają limit {CHARGER_CAPACITY}."
+        if qty > get_charger_slots():
+            return f"❌ Ładowarki mają limit {get_charger_slots()}."
         wiz["charging"] = qty
         if qty == 0:
             wiz["charge_start"] = None
@@ -3148,6 +3149,55 @@ def handle_command(text, user, chat_id):
     name = get_driver_name(user)
     user_id = str(user.id)
     responses = []
+
+    # ADMIN: dynamiczna liczba portów ładowania.
+    # Działa z ukośnikiem i bez: /setchargers 140 albo setchargers 140.
+    if t.startswith("/setchargers") or t.startswith("setchargers"):
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        parts = t.split()
+        if len(parts) < 2:
+            return "Użycie: /setchargers 140"
+
+        try:
+            value = int(parts[1])
+        except Exception:
+            return "Użycie: /setchargers 140"
+
+        if value < 1:
+            return "Liczba portów musi być większa od 0."
+
+        cfg = load_config()
+        cfg["charger_slots"] = value
+        save_config(cfg)
+
+        moved = auto_move_waiting_to_chargers(chat_id)
+        free = charger_free_slots()
+
+        moved_line = f"\nAutomatycznie przeniesiono z oczekujących do ładowarek: {moved}" if moved > 0 else ""
+
+        return (
+            f"✅ Zmieniono liczbę portów ładowania\n\n"
+            f"Nowy limit: {value}\n"
+            f"Wolne miejsca: {free}"
+            f"{moved_line}"
+        )
+
+    if t in ["/chargers", "chargers", "ladowarki", "ładowarki"]:
+        total = get_charger_slots()
+        inv = load_inventory()
+        charging = int(inv.get("charging", 0))
+        waiting = int(inv.get("waiting", 0))
+        free = charger_free_slots()
+
+        return (
+            f"🔌 ŁADOWARKI\n\n"
+            f"Porty razem: {total}\n"
+            f"Zajęte: {charging}\n"
+            f"Wolne: {free}\n"
+            f"Oczekujące: {waiting}"
+        )
 
     # Obsługa wyboru kierowcy po numerze po liście.
     restore_choice_reply = handle_restore_driver_choice(text, user, chat_id)
