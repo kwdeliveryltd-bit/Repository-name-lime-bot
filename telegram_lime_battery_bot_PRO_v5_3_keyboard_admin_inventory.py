@@ -1188,9 +1188,34 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     """
     Kierowca chce zabrać baterie, ale najpierw musi sprawdzić stany:
     gotowe, ladowarki, oczekuje, a dopiero potem ilość zabranych.
+
+    Ważne:
+    Jeżeli są baterie oczekujące i są wolne ładowarki, bot najpierw automatycznie
+    przesuwa OCZEKUJĄCE -> W ŁADOWARKACH. Dzięki temu nie zostaje stan typu:
+    ładowarki 0, oczekujące 169.
     """
+    inv_before = load_inventory()
+    waiting_before = int(inv_before.get("waiting", 0))
+    charging_before = int(inv_before.get("charging", 0))
+    free_before = max(0, CHARGER_CAPACITY - charging_before)
+
+    moved_to_charging = auto_move_waiting_to_chargers(chat_id)
+
     inv = load_inventory()
     expected_ready = int(inv.get("ready", 0))
+
+    warning = ""
+    if waiting_before > 0 and free_before > 0:
+        warning = (
+            "⚠️ UWAGA: były baterie OCZEKUJĄCE i wolne miejsca w ładowarkach.\n"
+            f"Bot automatycznie przełożył do ładowarek: {moved_to_charging}.\n"
+        )
+        if charging_before == 0:
+            warning += (
+                f"Wcześniej było: ładowarki 0, oczekujące {waiting_before}. "
+                "Sprawdź fizycznie, dlaczego baterie nie były przełożone.\n"
+            )
+        warning += "\n"
 
     data = load_driver_flow()
     data[str(user.id)] = {
@@ -1208,14 +1233,13 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
 
     return (
         "🚗 KONTROLA PRZED ZABRANIEM\n\n"
-        "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
+        + warning
+        + "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
         f"📌 STAN Z PAMIĘCI — GOTOWE: {expected_ready}\n"
         f"✅ Wpisz dokładnie: {expected_ready}\n"
         + (f"\nZapamiętałem, że chcesz zabrać: {pending_qty}." if pending_qty else "")
         + "\n\n1/4 Podaj ilość GOTOWYCH baterii:"
     )
-
-
 
 
 def charger_ready_to_remove():
@@ -1290,6 +1314,31 @@ def remove_ready_from_chargers(qty):
 
     save_jobs(data)
     return qty
+
+
+
+
+CONFIG_FILE = "config.json"
+
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {
+            "charger_slots": DEFAULT_CHARGER_SLOTS
+        }
+
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_config(data):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_charger_slots():
+    cfg = load_config()
+    return int(cfg.get("charger_slots", DEFAULT_CHARGER_SLOTS))
 
 
 def charger_free_slots():
@@ -1424,13 +1473,13 @@ def handle_driver_flow(text, user, chat_id):
     # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
     # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
     numeric_steps = {
-    ("pickup", "ready"),
-    ("pickup", "charging"),
-    ("pickup", "waiting"),
-    ("pickup", "take_qty"),
-    ("return_auto", "returned_qty"),
-    ("return_auto", "ready_returned"),
-}
+        ("pickup", "ready"),
+        ("pickup", "charging"),
+        ("pickup", "waiting"),
+        ("pickup", "take_qty"),
+        ("return_auto", "returned_qty"),
+        ("return_auto", "ready_returned"),
+    }
 
     if (flow.get("type"), flow.get("step")) in numeric_steps:
         if qty is None:
@@ -1642,40 +1691,61 @@ def handle_driver_flow(text, user, chat_id):
 
             return (
                 f"✅ Oddane razem: {qty}\n\n"
-                "2/3 Ile z oddanych baterii jest GOTOWYCH?"
+                "2/3 Ile z oddanych baterii jest GOTOWYCH?\n\n"
+                "Przykład:\n"
+                "Pobrałeś 50, oddajesz 50, gotowe są 3 → wpisz 3."
             )
 
         if flow["step"] == "ready_returned":
             returned = int(flow.get("returned", 0))
 
+            if qty < 0:
+                return "Liczba nie może być ujemna."
             if qty > returned:
-                return f"❌ Gotowych nie może być więcej niż oddanych. Oddane: {returned}."
+                return f"❌ Gotowych nie może być więcej niż oddanych. Oddane razem: {returned}."
 
             ready_returned = qty
             used_returned = returned - ready_returned
 
+            moved_before = auto_move_waiting_to_chargers(chat_id)
+
             free = charger_free_slots()
             to_charging = min(used_returned, free)
             to_waiting = used_returned - to_charging
+            missing = route_qty - returned
 
             flow["ready_returned"] = ready_returned
             flow["used_returned"] = used_returned
             flow["to_charging"] = to_charging
             flow["to_waiting"] = to_waiting
+            flow["auto_moved_before_return"] = moved_before
+            flow["missing_to_ready"] = 0
+            flow["next_action"] = "finish"
+            flow["take_extra"] = 0
             flow["step"] = "confirm_return_auto"
 
             data[key] = flow
             save_driver_flow(data)
 
+            missing_line = f"\n⚠️ Brakuje do pełnego zwrotu: {missing}\n" if missing > 0 else ""
+            moved_line = (
+                f"🔁 Najpierw automatycznie przełożono z oczekujących do ładowarek: {moved_before}\n"
+                if moved_before > 0 else ""
+            )
+
             return (
                 (
-                    f"📊 PODSUMOWANIE ZWROTU\n\n"
-                    f"Pobrane: {route_qty}\n"
+                    "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
+                    f"Pobrane na trasę: {route_qty}\n"
                     f"Oddane razem: {returned}\n"
-                    f"Gotowe: {ready_returned}\n"
-                    f"Do ładowarek: {to_charging}\n"
-                    f"Oczekujące: {to_waiting}\n\n"
-                    "3/3 Potwierdź:"
+                    f"📦 Gotowe przywiezione: {ready_returned}\n"
+                    f"🔋 Do ładowania/oczekujące: {used_returned}\n"
+                    f"{moved_line}"
+                    f"🔌 Wolne miejsca w ładowarkach: {free}\n"
+                    f"➡️ Do ładowarek: {to_charging}\n"
+                    f"➡️ Oczekujące: {to_waiting}\n"
+                    f"{missing_line}\n"
+                    "3/3 Wybierz opcję:"
                 ),
                 get_confirm_keyboard()
             )
@@ -1731,8 +1801,19 @@ def handle_driver_flow(text, user, chat_id):
             returned = int(flow.get("returned", 0))
             ready_returned = int(flow.get("ready_returned", 0))
             used_returned = int(flow.get("used_returned", returned - ready_returned))
-            to_charging = int(flow.get("to_charging", 0))
-            to_waiting = int(flow.get("to_waiting", 0))
+
+            if returned > original_qty:
+                clear_driver_flow(user.id)
+                return f"❌ Oddane ({returned}) nie może być większe niż trasa ({original_qty}). Zacznij zwrot od nowa."
+
+            if ready_returned > returned:
+                clear_driver_flow(user.id)
+                return "❌ Gotowe nie mogą być większe niż oddane. Zacznij zwrot od nowa."
+
+            moved_before_save = auto_move_waiting_to_chargers(chat_id)
+            free = charger_free_slots()
+            to_charging = min(used_returned, free)
+            to_waiting = used_returned - to_charging
 
             payment = calc_trip_payment(trip["start"], original_qty, ready_returned)
             end_time = payment["end"]
@@ -1776,9 +1857,10 @@ def handle_driver_flow(text, user, chat_id):
 
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
 
+            moved_total = int(flow.get("auto_moved_before_return", 0)) + moved_before_save + auto_moved_to_charging
             auto_move_line = (
-                f"Automatycznie z oczekujących do ładowarek: {auto_moved_to_charging}\n"
-                if auto_moved_to_charging > 0 else ""
+                f"Automatycznie z oczekujących do ładowarek: {moved_total}\n"
+                if moved_total > 0 else ""
             )
 
             return (
