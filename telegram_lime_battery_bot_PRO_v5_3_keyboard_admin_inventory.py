@@ -23,6 +23,7 @@ DRIVER_FLOW_FILE = "telegram_driver_flow.json"
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
 AUDIT_FILE = "telegram_audit_log.json"
+DRIVER_LIMITS_FILE = "telegram_driver_limits.json"
 
 FILE_LOCK = threading.RLock()
 
@@ -121,14 +122,18 @@ TZ = ZoneInfo("Europe/London")
 
 BASE_RATE = 2.00
 PENALTY_PER_HOUR = 0.10
-TIME_LIMIT_HOURS = 5
-SMALL_ROUTE_LIMIT_HOURS = 8
-SMALL_ROUTE_MAX_QTY = 30
+TIME_LIMIT_HOURS = 6
+SMALL_ROUTE_LIMIT_HOURS = 6
+SMALL_ROUTE_MAX_QTY = 60
 MIN_RATE = 1.00
 
 CHARGE_TIME_HOURS = 4.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
+DRIVER_MAX_BATTERIES = 60
+DRIVER_MIN_BATTERIES = 30
+DRIVER_LIMIT_STEP = 10
+DRIVER_ROUTE_TIME_LIMIT_HOURS = 6
 DEFAULT_CHARGER_SLOTS = 133  # domyślna liczba portów ładowania
 CHARGER_CAPACITY = DEFAULT_CHARGER_SLOTS  # fallback dla starych fragmentów kodu
 
@@ -153,12 +158,8 @@ def normalize_text(text):
 
 
 def trip_time_limit_hours(qty):
-    """8h tylko dla tras do 30 baterii włącznie, powyżej 30 zostaje 5h."""
-    try:
-        qty = int(qty)
-    except Exception:
-        qty = 0
-    return SMALL_ROUTE_LIMIT_HOURS if 1 <= qty <= SMALL_ROUTE_MAX_QTY else TIME_LIMIT_HOURS
+    """Każdy kierowca ma 6h na wykonanie trasy."""
+    return DRIVER_ROUTE_TIME_LIMIT_HOURS
 
 
 def load_json(path, default):
@@ -197,6 +198,93 @@ def load_db():
 
 def save_db(db):
     save_json(DB_FILE, db)
+
+
+
+def load_driver_limits():
+    return load_json(DRIVER_LIMITS_FILE, {"drivers": {}})
+
+
+def save_driver_limits(data):
+    save_json(DRIVER_LIMITS_FILE, data)
+
+
+def driver_limit_key(user):
+    return str(user.id)
+
+
+def get_driver_battery_limit(user):
+    data = load_driver_limits()
+    item = data.get("drivers", {}).get(driver_limit_key(user), {})
+    try:
+        limit = int(item.get("limit", DRIVER_MAX_BATTERIES))
+    except Exception:
+        limit = DRIVER_MAX_BATTERIES
+    return max(DRIVER_MIN_BATTERIES, min(DRIVER_MAX_BATTERIES, limit))
+
+
+def set_driver_battery_limit(user, limit, reason="manual"):
+    limit = max(DRIVER_MIN_BATTERIES, min(DRIVER_MAX_BATTERIES, int(limit)))
+    data = load_driver_limits()
+    drivers = data.setdefault("drivers", {})
+    drivers[driver_limit_key(user)] = {
+        "name": get_driver_name(user),
+        "limit": limit,
+        "reason": reason,
+        "updated_at": now().isoformat()
+    }
+    save_driver_limits(data)
+    return limit
+
+
+def update_driver_limit_after_trip(user, was_late):
+    old_limit = get_driver_battery_limit(user)
+
+    if was_late:
+        new_limit = max(DRIVER_MIN_BATTERIES, old_limit - DRIVER_LIMIT_STEP)
+        reason = "late_penalty"
+    else:
+        new_limit = min(DRIVER_MAX_BATTERIES, old_limit + DRIVER_LIMIT_STEP)
+        reason = "on_time_reward"
+
+    set_driver_battery_limit(user, new_limit, reason)
+    return old_limit, new_limit
+
+
+def driver_limit_status_line(user):
+    limit = get_driver_battery_limit(user)
+    if limit >= DRIVER_MAX_BATTERIES:
+        return f"Limit kierowcy: {limit} baterii ✅"
+    return f"Limit kierowcy po karze: {limit} baterii ⚠️"
+
+
+def driver_limit_change_message(user, was_late):
+    old_limit, new_limit = update_driver_limit_after_trip(user, was_late)
+
+    if was_late:
+        if new_limit < old_limit:
+            return (
+                "🚨 KARA LIMITU\n"
+                f"Spóźnienie obniża następny limit: {old_limit} → {new_limit} baterii.\n"
+                f"Minimum kary: {DRIVER_MIN_BATTERIES}. Żeby wracać do maxa {DRIVER_MAX_BATTERIES}, kierowca musi przywozić na czas.\n"
+            )
+        return (
+            "🚨 KARA LIMITU\n"
+            f"Kierowca jest już na minimum: {new_limit} baterii.\n"
+            "Żeby podnieść limit, musi przywieźć następną trasę na czas.\n"
+        )
+
+    if new_limit > old_limit:
+        return (
+            "✅ LIMIT PODNIESIONY\n"
+            f"Trasa na czas: {old_limit} → {new_limit} baterii.\n"
+        )
+
+    return (
+        "✅ LIMIT UTRZYMANY\n"
+        f"Kierowca ma maksymalny limit: {new_limit} baterii.\n"
+    )
+
 
 
 def load_inventory():
@@ -1204,6 +1292,7 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
 
     inv = load_inventory()
     expected_ready = int(inv.get("ready", 0))
+    driver_limit = get_driver_battery_limit(user)
 
     warning = ""
     if waiting_before > 0 and free_before > 0:
@@ -1237,6 +1326,8 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
         + warning
         + "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
         f"📌 STAN Z PAMIĘCI — GOTOWE: {expected_ready}\n"
+        f"🚦 Twój aktualny limit pobrania: {driver_limit} baterii\n"
+        f"⏱️ Czas na trasę: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
         f"✅ Wpisz dokładnie: {expected_ready}\n"
         + (f"\nZapamiętałem, że chcesz zabrać: {pending_qty}." if pending_qty else "")
         + "\n\n1/4 Podaj ilość GOTOWYCH baterii:"
@@ -1592,6 +1683,15 @@ def handle_driver_flow(text, user, chat_id):
             if qty_take < 1:
                 return "🚨 Nie można zabrać 0. Minimum to 1."
 
+            driver_limit = get_driver_battery_limit(user)
+            if qty_take > driver_limit:
+                return (
+                    f"❌ Nie możesz zabrać {qty_take} baterii.\n\n"
+                    f"{driver_limit_status_line(user)}\n"
+                    f"Max systemu: {DRIVER_MAX_BATTERIES}, minimum po karach: {DRIVER_MIN_BATTERIES}.\n"
+                    "Przywieź trasę na czas, żeby podnieść limit."
+                )
+
             inv = load_inventory()
             ready = int(inv.get("ready", 0))
             if qty_take > ready:
@@ -1612,6 +1712,8 @@ def handle_driver_flow(text, user, chat_id):
                 "chat_id": chat_id,
                 "start": start_time.isoformat(),
                 "qty": qty_take,
+                "limit_at_start": driver_limit,
+                "time_limit_hours": DRIVER_ROUTE_TIME_LIMIT_HOURS,
                 "end": None,
                 "alert_sent": False
             })
@@ -1625,7 +1727,8 @@ def handle_driver_flow(text, user, chat_id):
                 f"{get_driver_name(user)} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty_take}\n"
-                f"Limit: {trip_time_limit_hours(qty_take)}h\n"
+                f"Limit czasu: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
+                f"Limit baterii kierowcy: {driver_limit}\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -1633,6 +1736,15 @@ def handle_driver_flow(text, user, chat_id):
         if flow["step"] == "take_qty":
             if qty < 1:
                 return "🚨 Nie można zabrać 0. Minimum to 1."
+
+            driver_limit = get_driver_battery_limit(user)
+            if qty > driver_limit:
+                return (
+                    f"❌ Nie możesz zabrać {qty} baterii.\n\n"
+                    f"{driver_limit_status_line(user)}\n"
+                    f"Max systemu: {DRIVER_MAX_BATTERIES}, minimum po karach: {DRIVER_MIN_BATTERIES}.\n"
+                    "Przywieź trasę na czas, żeby podnieść limit."
+                )
 
             inv = load_inventory()
             ready = int(inv.get("ready", 0))
@@ -1654,6 +1766,8 @@ def handle_driver_flow(text, user, chat_id):
                 "chat_id": chat_id,
                 "start": start_time.isoformat(),
                 "qty": qty,
+                "limit_at_start": driver_limit,
+                "time_limit_hours": DRIVER_ROUTE_TIME_LIMIT_HOURS,
                 "end": None,
                 "alert_sent": False
             })
@@ -1667,7 +1781,8 @@ def handle_driver_flow(text, user, chat_id):
                 f"{get_driver_name(user)} ✅\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty}\n"
-                f"Limit: {trip_time_limit_hours(qty)}h\n"
+                f"Limit czasu: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
+                f"Limit baterii kierowcy: {driver_limit}\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -1816,12 +1931,12 @@ def handle_driver_flow(text, user, chat_id):
             to_charging = min(used_returned, free)
             to_waiting = used_returned - to_charging
 
-            payment = calc_trip_payment(trip["start"], original_qty, ready_returned)
+            payment = calc_trip_payment(trip["start"], original_qty, returned)
             end_time = payment["end"]
             hours = payment["hours"]
             late_hours = payment["late_hours"]
             penalty_steps = payment["penalty_steps"]
-            gross_ready_earned = payment["gross_ready_earned"]
+            gross_returned_earned = payment["gross_returned_earned"]
             time_penalty = payment["time_penalty"]
             earned = payment["earned"]
 
@@ -1833,13 +1948,14 @@ def handle_driver_flow(text, user, chat_id):
             trip["hours"] = hours
             trip["late_hours"] = late_hours
             trip["penalty_steps"] = penalty_steps
-            trip["gross_ready_earned"] = gross_ready_earned
+            trip["gross_returned_earned"] = gross_returned_earned
+            trip["gross_ready_earned"] = gross_returned_earned
             trip["time_penalty"] = time_penalty
-            trip["paid_qty"] = ready_returned
+            trip["paid_qty"] = returned
             trip["rate"] = BASE_RATE
-            trip["earned"] = earned
+            trip["earned"] = 0
             trip["return_auto"] = True
-            trip["payment_logic"] = "ready_minus_time_penalty_from_route_qty_v2"
+            trip["payment_logic"] = "returned_minus_time_penalty_from_route_qty_v3"
 
             save_db(db)
 
@@ -1853,6 +1969,9 @@ def handle_driver_flow(text, user, chat_id):
                 add_charging_job_from_return(chat_id, to_charging)
 
             auto_moved_to_charging = auto_move_waiting_to_chargers(chat_id)
+
+            was_late = late_hours > 0
+            limit_change_line = driver_limit_change_message(user, was_late)
 
             clear_driver_flow(user.id)
 
@@ -1875,9 +1994,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"{auto_move_line}"
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
-                f"Zarobek za gotowe ({ready_returned} × £{BASE_RATE:.2f}): £{gross_ready_earned:.2f}\n"
-                f"Kara czasowa ({original_qty} × £{PENALTY_PER_HOUR:.2f} × {penalty_steps}h): -£{time_penalty:.2f}\n"
-                f"Do wypłaty: £{earned:.2f}\n\n"
+                f"{limit_change_line}\n"
                 f"{status_report()}"
             )
 
@@ -2665,6 +2782,20 @@ def active_trip(db, user_id, user=None):
 
     return None
 
+def calculate_driver_payout_v2(trip, returned, ready_returned=0):
+    """
+    Tymczasowa funkcja wypłaty.
+    Wypłaty i kary są teraz wyłączone.
+    Później tutaj można wstawić nową logikę.
+    """
+    return {
+        "earned": 0,
+        "penalty": 0,
+        "payout": 0,
+        "description": ""
+    }
+
+
 def calc_trip(start_iso, qty):
     """
     Stara funkcja zostaje dla kompatybilności raportów / starszych rekordów.
@@ -2682,42 +2813,39 @@ def calc_trip(start_iso, qty):
     return end, hours, late_hours, rate, earned
 
 
-def calc_trip_payment(start_iso, route_qty, ready_returned):
+def calc_trip_payment(start_iso, route_qty, paid_qty):
     """
-    NOWA LOGIKA WYPŁATY:
+    LOGIKA WYPŁATY:
 
-    - zarobek bazowy: tylko GOTOWE przywiezione baterie × BASE_RATE
+    - zarobek bazowy: ODDANE RAZEM baterie × BASE_RATE
     - kara czasowa: CAŁA trasa / pobrane baterie × PENALTY_PER_HOUR × rozpoczęte godziny spóźnienia
     - do wypłaty: max(0, zarobek bazowy - kara czasowa)
-
-    Przykład:
-    Pobrane 40, gotowe 10, spóźnienie 2h:
-    10 × £2.00 - 40 × £0.10 × 2 = £12.00
     """
     start = datetime.fromisoformat(start_iso)
     end = now()
     hours = (end - start).total_seconds() / 3600
 
     route_qty = int(route_qty)
-    ready_returned = int(ready_returned)
+    paid_qty = int(paid_qty)
 
     limit_hours = trip_time_limit_hours(route_qty)
     late_hours = max(0, hours - limit_hours)
     penalty_steps = math.ceil(late_hours) if late_hours > 0 else 0
 
-    gross_ready_earned = ready_returned * BASE_RATE
+    gross_returned_earned = paid_qty * BASE_RATE
     time_penalty = route_qty * PENALTY_PER_HOUR * penalty_steps
-    earned = max(0.0, gross_ready_earned - time_penalty)
+    earned = max(0.0, gross_returned_earned - time_penalty)
 
     return {
         "end": end,
         "hours": hours,
         "late_hours": late_hours,
         "penalty_steps": penalty_steps,
-        "gross_ready_earned": gross_ready_earned,
+        "gross_returned_earned": gross_returned_earned,
+        "gross_ready_earned": gross_returned_earned,  # kompatybilność ze starymi raportami
         "time_penalty": time_penalty,
         "earned": earned,
-        "paid_qty": ready_returned,
+        "paid_qty": paid_qty,
         "route_qty": route_qty,
     }
 
@@ -2873,7 +3001,6 @@ def weekly_all_drivers_report():
         "TOTAL FIRMA:",
         f"Oddane baterie: {total_batt}",
         f"Trasy: {total_trips}",
-        f"Do wypłaty: £{total_earned:.2f}",
         "━━━━━━━━━━",
     ]
 
@@ -2932,7 +3059,6 @@ def report(period="dzis"):
             ""
         ]
 
-    lines += ["━━━━━━━━━━", "TOTAL FIRMA:", f"Oddane baterie: {total_batt}", f"Trasy: {total_trips}", f"Do wypłaty: £{total_earned:.2f}", "━━━━━━━━━━"]
     return "\n".join(lines)
 
 
@@ -3182,6 +3308,19 @@ def handle_command(text, user, chat_id):
             f"Nowy limit: {value}\n"
             f"Wolne miejsca: {free}"
             f"{moved_line}"
+        )
+
+    if t in ["/movecharging", "movecharging", "przeniesladowarki", "przenieśładowarki", "przenies_ladowarki"]:
+        if user.id not in ADMIN_IDS:
+            return "Brak dostępu."
+
+        moved = auto_move_waiting_to_chargers(chat_id)
+        inv = load_inventory()
+        return (
+            f"✅ Przeniesiono oczekujące do ładowarek: {moved}\n\n"
+            f"⏳ Oczekujące: {int(inv.get('waiting', 0))}\n"
+            f"🔌 W ładowarkach: {int(inv.get('charging', 0))}\n"
+            f"🔌 Wolne porty: {charger_free_slots()}"
         )
 
     if t in ["/chargers", "chargers", "ladowarki", "ładowarki"]:
