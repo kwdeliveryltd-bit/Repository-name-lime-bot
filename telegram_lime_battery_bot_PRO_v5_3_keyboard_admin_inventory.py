@@ -134,7 +134,7 @@ DRIVER_MAX_BATTERIES = 60
 DRIVER_MIN_BATTERIES = 30
 DRIVER_LIMIT_STEP = 10
 DRIVER_ROUTE_TIME_LIMIT_HOURS = 6
-DEFAULT_CHARGER_SLOTS = 133  # domyślna liczba portów ładowania
+DEFAULT_CHARGER_SLOTS = 154  # domyślna liczba portów ładowania
 CHARGER_CAPACITY = DEFAULT_CHARGER_SLOTS  # fallback dla starych fragmentów kodu
 
 
@@ -1308,6 +1308,33 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
         warning += "\n"
 
     data = load_driver_flow()
+
+    current_inv = load_inventory()
+    current_waiting = int(current_inv.get("waiting", 0))
+    current_charging = int(current_inv.get("charging", 0))
+
+    if current_charging == 0 and current_waiting > 0:
+        data[str(user.id)] = {
+            "type": "pickup_manual_charge_check",
+            "chat_id": chat_id,
+            "step": "manual_charge_qty",
+            "driver": get_driver_name(user),
+            "created_at": now().isoformat(),
+            "pending_qty": pending_qty,
+        }
+        save_driver_flow(data)
+
+        return (
+            "⚠️ UWAGA\n\n"
+            f"W systemie:\n"
+            f"🔌 Ładowarki: 0\n"
+            f"⏳ Oczekujące: {current_waiting}\n\n"
+            "Czy przełożyłeś baterie do ładowania?\n"
+            "Jeśli tak — wpisz ile sztuk właśnie włożyłeś do ładowarek.\n\n"
+            "Przykład:\n"
+            "40"
+        )
+
     data[str(user.id)] = {
         "type": "pickup",
         "chat_id": chat_id,
@@ -1571,6 +1598,7 @@ def handle_driver_flow(text, user, chat_id):
         ("pickup", "take_qty"),
         ("return_auto", "returned_qty"),
         ("return_auto", "ready_returned"),
+        ("pickup_manual_charge_check", "manual_charge_qty"),
     }
 
     if (flow.get("type"), flow.get("step")) in numeric_steps:
