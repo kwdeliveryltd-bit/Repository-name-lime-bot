@@ -134,7 +134,7 @@ DRIVER_MAX_BATTERIES = 60
 DRIVER_MIN_BATTERIES = 30
 DRIVER_LIMIT_STEP = 10
 DRIVER_ROUTE_TIME_LIMIT_HOURS = 6
-DEFAULT_CHARGER_SLOTS = 154  # domyślna liczba portów ładowania
+DEFAULT_CHARGER_SLOTS = 156  # domyślna liczba portów ładowania
 CHARGER_CAPACITY = DEFAULT_CHARGER_SLOTS  # fallback dla starych fragmentów kodu
 
 
@@ -1909,6 +1909,34 @@ def handle_driver_flow(text, user, chat_id):
                 )
 
             if not is_ok_text(t):
+                if qty is not None:
+                    to_charging_info = int(flow.get("to_charging", 0))
+                    to_waiting_info = int(flow.get("to_waiting", 0))
+
+                    if qty == to_charging_info:
+                        msg = (
+                            f"✅ Tak, bot policzył: {to_charging_info} do ładowarek.\n"
+                            f"Oczekujące: {to_waiting_info}.\n\n"
+                            "Teraz kliknij 🟢 OK, żeby zapisać zwrot."
+                        )
+                    elif qty == to_waiting_info:
+                        msg = (
+                            f"✅ Tak, bot policzył: {to_waiting_info} oczekujące.\n"
+                            f"Do ładowarek: {to_charging_info}.\n\n"
+                            "Teraz kliknij 🟢 OK, żeby zapisać zwrot."
+                        )
+                    else:
+                        msg = (
+                            "To jest już krok potwierdzenia. Bot sam policzył rozdział baterii.\n\n"
+                            f"Do ładowarek: {to_charging_info}\n"
+                            f"Oczekujące: {to_waiting_info}\n\n"
+                            "Kliknij 🟢 OK, żeby zapisać albo ✏️ Edit, żeby poprawić."
+                        )
+
+                    data[key] = flow
+                    save_driver_flow(data)
+                    return (msg, get_confirm_keyboard())
+
                 flow["confirm_blocked"] = True
                 flow["blocked_reason"] = text
                 data[key] = flow
