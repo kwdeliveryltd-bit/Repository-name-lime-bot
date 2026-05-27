@@ -1275,89 +1275,54 @@ def clear_driver_flow(user_id):
 
 def start_pickup_flow(user, chat_id, pending_qty=None):
     """
-    Kierowca chce zabrać baterie, ale najpierw musi sprawdzić stany:
-    gotowe, ladowarki, oczekuje, a dopiero potem ilość zabranych.
-
-    Ważne:
-    Jeżeli są baterie oczekujące i są wolne ładowarki, bot najpierw automatycznie
-    przesuwa OCZEKUJĄCE -> W ŁADOWARKACH. Dzięki temu nie zostaje stan typu:
-    ładowarki 0, oczekujące 169.
+    Prosty pickup:
+    - pokazuje cały stan od razu,
+    - pyta tylko ile kierowca zabiera,
+    - zmianę stanu robi dopiero przez ✏️ Edit w podsumowaniu.
     """
-    inv_before = load_inventory()
-    waiting_before = int(inv_before.get("waiting", 0))
-    charging_before = int(inv_before.get("charging", 0))
-    free_before = max(0, get_charger_slots() - charging_before)
-
-    moved_to_charging = auto_move_waiting_to_chargers(chat_id)
-
     inv = load_inventory()
-    expected_ready = int(inv.get("ready", 0))
-    driver_limit = get_driver_battery_limit(user)
 
-    warning = ""
-    if waiting_before > 0 and free_before > 0:
-        warning = (
-            "⚠️ UWAGA: były baterie OCZEKUJĄCE i wolne miejsca w ładowarkach.\n"
-            f"Bot automatycznie przełożył do ładowarek: {moved_to_charging}.\n"
-        )
-        if charging_before == 0:
-            warning += (
-                f"Wcześniej było: ładowarki 0, oczekujące {waiting_before}. "
-                "Sprawdź fizycznie, dlaczego baterie nie były przełożone.\n"
-            )
-        warning += "\n"
+    ready = int(inv.get("ready", 0))
+    charging = int(inv.get("charging", 0))
+    waiting = int(inv.get("waiting", 0))
+
+    try:
+        limit = get_driver_battery_limit(user)
+    except Exception:
+        limit = 60
 
     data = load_driver_flow()
-
-    current_inv = load_inventory()
-    current_waiting = int(current_inv.get("waiting", 0))
-    current_charging = int(current_inv.get("charging", 0))
-
-    if current_charging == 0 and current_waiting > 0:
-        data[str(user.id)] = {
-            "type": "pickup_manual_charge_check",
-            "chat_id": chat_id,
-            "step": "manual_charge_qty",
-            "driver": get_driver_name(user),
-            "created_at": now().isoformat(),
-            "pending_qty": pending_qty,
-        }
-        save_driver_flow(data)
-
-        return (
-            "⚠️ UWAGA\n\n"
-            f"W systemie:\n"
-            f"🔌 Ładowarki: 0\n"
-            f"⏳ Oczekujące: {current_waiting}\n\n"
-            "Czy przełożyłeś baterie do ładowania?\n"
-            "Jeśli tak — wpisz ile sztuk właśnie włożyłeś do ładowarek.\n\n"
-            "Przykład:\n"
-            "40"
-        )
-
     data[str(user.id)] = {
-        "type": "pickup",
+        "type": "pickup_simple",
         "chat_id": chat_id,
-        "step": "ready",
+        "step": "take_qty",
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
-        "ready": None,
-        "charging": None,
-        "waiting": None,
-        "qty": pending_qty
+        "ready": ready,
+        "charging": charging,
+        "waiting": waiting,
+        "qty": pending_qty,
     }
     save_driver_flow(data)
 
+    if pending_qty:
+        return (
+            "🚗 PICKUP\n\n"
+            f"📦 Gotowe: {ready}\n"
+            f"🔌 W ładowarkach: {charging}\n"
+            f"⏳ Oczekujące: {waiting}\n\n"
+            f"🚦 Twój limit: {limit}\n"
+            f"🚗 Chcesz zabrać: {pending_qty}\n\n"
+            "Wpisz tę liczbę jeszcze raz albo wpisz inną."
+        )
+
     return (
-        "🚗 KONTROLA PRZED ZABRANIEM\n\n"
-        + warning
-        + "Najpierw sprawdzamy magazyn, żeby nie rozjechały się stany.\n\n"
-        f"📌 STAN Z PAMIĘCI — GOTOWE: {expected_ready}\n"
-        f"🚦 Twój aktualny limit pobrania: {driver_limit} baterii\n"
-        f"⏱️ Czas na trasę: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
-        f"✅ Wpisz dokładnie: {expected_ready}\n"
-        + (f"\nZapamiętałem, że chcesz zabrać: {pending_qty}." if pending_qty else "")
-        + "\n\n1/4 Podaj ilość GOTOWYCH baterii:"
+        "🚗 PICKUP\n\n"
+        f"📦 Gotowe: {ready}\n"
+        f"🔌 W ładowarkach: {charging}\n"
+        f"⏳ Oczekujące: {waiting}\n\n"
+        f"🚦 Twój limit: {limit}\n\n"
+        "Ile baterii zabierasz?"
     )
 
 
@@ -1592,6 +1557,7 @@ def handle_driver_flow(text, user, chat_id):
     # Tylko te kroki wymagają liczby. Kroki tekstowe typu:
     # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
     numeric_steps = {
+        ("pickup_simple", "take_qty"),
         ("pickup", "ready"),
         ("pickup", "charging"),
         ("pickup", "waiting"),
@@ -1606,6 +1572,111 @@ def handle_driver_flow(text, user, chat_id):
             return "Wpisz liczbę albo wpisz: anuluj"
         if qty < 0:
             return "Liczba nie może być ujemna."
+
+
+    if flow.get("type") == "pickup_simple":
+        if flow["step"] == "take_qty":
+            if qty < 1:
+                return "🚨 Minimum to 1 bateria."
+
+            try:
+                limit = get_driver_battery_limit(user)
+            except Exception:
+                limit = 60
+
+            if qty > limit:
+                return (
+                    f"❌ Nie możesz zabrać {qty} baterii.\n\n"
+                    f"Twój aktualny limit: {limit}."
+                )
+
+            inv = load_inventory()
+            ready = int(inv.get("ready", 0))
+            charging = int(inv.get("charging", 0))
+            waiting = int(inv.get("waiting", 0))
+
+            if qty > ready:
+                return f"❌ Gotowych jest tylko: {ready}"
+
+            flow["qty"] = qty
+            flow["ready"] = ready
+            flow["charging"] = charging
+            flow["waiting"] = waiting
+            flow["step"] = "confirm"
+
+            data[key] = flow
+            save_driver_flow(data)
+
+            return (
+                (
+                    "✅ PODSUMOWANIE PICKUP\n\n"
+                    f"📦 Gotowe teraz: {ready}\n"
+                    f"🔌 W ładowarkach: {charging}\n"
+                    f"⏳ Oczekujące: {waiting}\n\n"
+                    f"🚗 Zabierasz: {qty}\n"
+                    f"📦 Gotowe po pobraniu: {ready - qty}\n\n"
+                    "🟢 OK / 🔴 Cancel"
+                ),
+                get_confirm_keyboard()
+            )
+
+        if flow["step"] == "confirm":
+            if not is_ok_text(t):
+                return (
+                    "Kliknij tylko:\n"
+                    "🟢 OK\n"
+                    "🔴 Cancel",
+                    get_confirm_keyboard()
+                )
+
+            qty_take = int(flow.get("qty", 0))
+
+            inv = load_inventory()
+            ready = int(inv.get("ready", 0))
+
+            if qty_take > ready:
+                return f"❌ Gotowych jest teraz tylko {ready}. Kliknij ✏️ Edit albo zacznij pickup od nowa."
+
+            db = load_db()
+            existing = active_trip(db, user.id, user)
+            if existing:
+                clear_driver_flow(user.id)
+                return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Oddane"
+
+            start_time = now()
+            deadline = start_time + timedelta(hours=trip_time_limit_hours(qty_take))
+
+            db["trips"].append({
+                "driver": get_driver_name(user),
+                "user_id": str(user.id),
+                "chat_id": chat_id,
+                "start": start_time.isoformat(),
+                "qty": qty_take,
+                "limit_at_start": flow.get("limit_at_start"),
+                "time_limit_hours": trip_time_limit_hours(qty_take),
+                "end": None,
+                "alert_sent": False
+            })
+            save_db(db)
+
+            inv["ready"] = ready - qty_take
+            save_inventory(inv)
+
+            clear_driver_flow(user.id)
+
+            return (
+                f"✅ PICKUP ZAPISANY\n\n"
+                f"Kierowca: {get_driver_name(user)}\n"
+                f"Start: {start_time.strftime('%H:%M')}\n"
+                f"Pobrane: {qty_take}\n"
+                f"Limit czasu: {trip_time_limit_hours(qty_take)}h\n"
+                f"Deadline: {deadline.strftime('%H:%M')}\n\n"
+                f"{status_report()}"
+            )
+
+        clear_driver_flow(user.id)
+        return "⚠️ Pickup się zaciął. Wpisz pickup jeszcze raz."
+
 
     # FLOW: pobranie baterii — prosty i odporny kreator
     if flow.get("type") == "pickup":
@@ -1930,7 +2001,7 @@ def handle_driver_flow(text, user, chat_id):
                             "To jest już krok potwierdzenia. Bot sam policzył rozdział baterii.\n\n"
                             f"Do ładowarek: {to_charging_info}\n"
                             f"Oczekujące: {to_waiting_info}\n\n"
-                            "Kliknij 🟢 OK, żeby zapisać albo ✏️ Edit, żeby poprawić."
+                            "Kliknij 🟢 OK, żeby zapisać zwrot."
                         )
 
                     data[key] = flow
