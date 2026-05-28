@@ -1721,6 +1721,15 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    # GLOBAL_G_COMMAND_IN_FLOW
+    # G ma otworzyć raport nawet gdy użytkownik ma stary flow.
+    if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
+        if flow and flow.get("type") == "g_ready_batch":
+            pass
+        else:
+            clear_driver_flow(user.id)
+            return start_g_command_flow(user, chat_id)
+
     if t in ["kierowcy", "lista kierowcow", "lista kierowców", "drivers"]:
         return drivers_list_text()
 
@@ -3604,6 +3613,12 @@ def help_text():
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
+
+    # GLOBAL_G_COMMAND_EARLY
+    # Komenda G musi działać przed obsługą flow/potwierdzeń.
+    if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
+        clear_driver_flow(user.id)
+        return start_g_command_flow(user, chat_id)
 
     if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
         return start_g_command_flow(user, chat_id)
