@@ -128,7 +128,6 @@ SMALL_ROUTE_MAX_QTY = 60
 MIN_RATE = 1.00
 
 CHARGE_TIME_HOURS = 4.5
-MIN_CHARGE_TIME_HOURS = 3.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
 DRIVER_MAX_BATTERIES = 60
@@ -830,182 +829,6 @@ def active_trip_details():
             details[name] = details.get(name, 0) + int(trip.get("qty", 0))
 
     return details
-
-
-
-def active_charging_jobs_for_g():
-    data = load_jobs()
-    jobs = []
-    for job in data.get("jobs", []):
-        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
-            try:
-                qty = int(job.get("qty", 0))
-                ready_at = datetime.fromisoformat(job["ready_at"])
-                start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-            except Exception:
-                continue
-
-            if qty > 0:
-                jobs.append((ready_at, start_at, job))
-
-    jobs.sort(key=lambda x: x[0])
-    return [job for _, _, job in jobs]
-
-
-def g_job_elapsed_hours(job):
-    try:
-        start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-    except Exception:
-        return 0
-    return max(0, (now() - start_at).total_seconds() / 3600)
-
-
-def g_job_elapsed_text(job):
-    minutes = int(g_job_elapsed_hours(job) * 60)
-    return f"{minutes // 60}h {minutes % 60}min"
-
-
-def g_job_can_be_removed(job):
-    return g_job_elapsed_hours(job) >= MIN_CHARGE_TIME_HOURS
-
-
-def g_time_left_text(ready_at):
-    seconds = int((ready_at - now()).total_seconds())
-    if seconds <= 0:
-        return "✅ gotowe do wyjęcia"
-    minutes = (seconds + 59) // 60
-    return f"zostało {minutes // 60}h {minutes % 60}min"
-
-
-def g_min_time_left_text(job):
-    try:
-        start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-    except Exception:
-        return ""
-    min_ready_at = start_at + timedelta(hours=MIN_CHARGE_TIME_HOURS)
-    seconds = int((min_ready_at - now()).total_seconds())
-    if seconds <= 0:
-        return ""
-    minutes = (seconds + 59) // 60
-    return f"minimum za {minutes // 60}h {minutes % 60}min"
-
-
-def g_charging_report_text():
-    jobs = active_charging_jobs_for_g()
-    if not jobs:
-        return "🔌 Brak aktywnych partii w ładowarkach."
-
-    lines = ["🔌 PARTIE W ŁADOWARKACH:"]
-    for job in jobs:
-        qty = int(job.get("qty", 0))
-        ready_at = datetime.fromisoformat(job["ready_at"])
-        left = g_time_left_text(ready_at)
-        elapsed = g_job_elapsed_text(job)
-
-        if g_job_can_be_removed(job):
-            lines.append(f"• {qty} baterii — {left} — w ładowarce {elapsed}")
-        else:
-            min_left = g_min_time_left_text(job)
-            lines.append(f"• {qty} baterii — {left} — w ładowarce {elapsed} — ⛔ {min_left}")
-
-    lines.append("\nMinimum do wyjęcia przez G: 3h 30min")
-    return "\n".join(lines)
-
-
-def g_nearest_removable_job():
-    candidates = []
-    for job in active_charging_jobs_for_g():
-        if not g_job_can_be_removed(job):
-            continue
-        try:
-            ready_at = datetime.fromisoformat(job["ready_at"])
-        except Exception:
-            continue
-        candidates.append((ready_at, job))
-
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1] if candidates else None
-
-
-def g_finish_nearest_batch(chat_id):
-    data = load_jobs()
-    jobs = data.get("jobs", [])
-
-    candidates = []
-    for index, job in enumerate(jobs):
-        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
-            try:
-                qty = int(job.get("qty", 0))
-                ready_at = datetime.fromisoformat(job["ready_at"])
-            except Exception:
-                continue
-
-            if qty > 0 and g_job_can_be_removed(job):
-                candidates.append((ready_at, index, job))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    ready_at, index, job = candidates[0]
-    qty = int(job.get("qty", 0))
-
-    inv = load_inventory()
-    inv["charging"] = max(0, int(inv.get("charging", 0)) - qty)
-    inv["ready"] = int(inv.get("ready", 0)) + qty
-    save_inventory(inv)
-
-    jobs[index]["ready_sent"] = True
-    jobs[index]["status"] = "done"
-    jobs[index]["finished_by_g_at"] = now().isoformat()
-    save_jobs(data)
-
-    moved = auto_move_waiting_to_chargers(chat_id)
-
-    return {
-        "qty": qty,
-        "moved_waiting_to_charging": moved
-    }
-
-
-def start_g_command_flow(user, chat_id):
-    report = g_charging_report_text()
-    job = g_nearest_removable_job()
-
-    if not job:
-        return (
-            "🔋 RAPORT ŁADOWAREK — G\n\n"
-            f"{report}\n\n"
-            "Nie ma jeszcze partii gotowej do wyjęcia przez G."
-        )
-
-    qty = int(job.get("qty", 0))
-    ready_at = datetime.fromisoformat(job["ready_at"])
-    left = g_time_left_text(ready_at)
-    elapsed = g_job_elapsed_text(job)
-
-    data = load_driver_flow()
-    data[str(user.id)] = {
-        "type": "g_ready_batch",
-        "chat_id": chat_id,
-        "step": "confirm",
-        "driver": get_driver_name(user),
-        "created_at": now().isoformat(),
-        "qty": qty,
-    }
-    save_driver_flow(data)
-
-    return (
-        (
-            "🔋 RAPORT ŁADOWAREK — G\n\n"
-            f"{report}\n\n"
-            "🟢 NAJBLIŻSZA PARTIA DO WYJĘCIA:\n"
-            f"• {qty} baterii — {left} — w ładowarce {elapsed}\n\n"
-            "Kliknij 🟢 OK, jeśli wyjmujesz tę partię."
-        ),
-        get_confirm_keyboard()
-    )
-
 
 
 def status_report():
@@ -1728,35 +1551,6 @@ def handle_driver_flow(text, user, chat_id):
         audit_log("flow_cancelled", user, chat_id, {"flow": flow})
         clear_driver_flow(user.id)
         return "❌ Przerwano kontrolę. Możesz zacząć od nowa."
-
-
-    if flow.get("type") == "g_ready_batch":
-        if flow["step"] == "confirm":
-            if not is_ok_text(t):
-                return (
-                    "Kliknij 🟢 OK, żeby wyjąć podświetloną partię, albo 🔴 Cancel.",
-                    get_confirm_keyboard()
-                )
-
-            result = g_finish_nearest_batch(chat_id)
-            clear_driver_flow(user.id)
-
-            if not result:
-                return "🔌 Nie ma partii spełniającej minimum 3h30."
-
-            moved = int(result.get("moved_waiting_to_charging", 0))
-            moved_line = (
-                f"🔁 Z oczekujących do ładowarek: {moved}\n"
-                if moved > 0 else
-                "🔁 Nic nie przełożono z oczekujących.\n"
-            )
-
-            return (
-                f"✅ PARTIA WYJĘTA Z ŁADOWAREK\n\n"
-                f"📦 Dodano do gotowych: {result['qty']}\n"
-                f"{moved_line}\n"
-                f"{status_report()}"
-            )
 
     qty = number_from_text(text)
 
@@ -3604,9 +3398,6 @@ def help_text():
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
-
-    if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
-        return start_g_command_flow(user, chat_id)
     db = load_db()
     name = get_driver_name(user)
     user_id = str(user.id)
