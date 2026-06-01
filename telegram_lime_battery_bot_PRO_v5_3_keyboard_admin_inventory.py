@@ -1008,6 +1008,102 @@ def start_g_command_flow(user, chat_id):
 
 
 
+
+def day_bounds_for_tasks():
+    start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1) - timedelta(seconds=1)
+    return start, end
+
+
+def week_bounds_for_tasks():
+    """
+    Tydzień roboczy:
+    start: poniedziałek 00:01
+    koniec: niedziela 23:59
+    """
+    current = now()
+    monday = (current - timedelta(days=current.weekday())).replace(hour=0, minute=1, second=0, microsecond=0)
+    sunday_end = monday + timedelta(days=6, hours=23, minutes=58)
+    return monday, sunday_end
+
+
+def completed_tasks_count(start_dt, end_dt):
+    db = load_db()
+    count = 0
+    batteries = 0
+    drivers = {}
+
+    for trip in db.get("trips", []):
+        end_iso = trip.get("end")
+        if not end_iso:
+            continue
+
+        try:
+            end = datetime.fromisoformat(end_iso)
+        except Exception:
+            continue
+
+        if not (start_dt <= end <= end_dt):
+            continue
+
+        count += 1
+        returned = int(trip.get("returned", trip.get("qty", 0)) or 0)
+        batteries += returned
+
+        name = trip.get("driver", "Nieznany")
+        item = drivers.setdefault(name, {"tasks": 0, "batteries": 0})
+        item["tasks"] += 1
+        item["batteries"] += returned
+
+    return {
+        "tasks": count,
+        "batteries": batteries,
+        "drivers": drivers,
+    }
+
+
+def tasks_counter_text():
+    day_start, day_end = day_bounds_for_tasks()
+    week_start, week_end = week_bounds_for_tasks()
+
+    daily = completed_tasks_count(day_start, day_end)
+    weekly = completed_tasks_count(week_start, week_end)
+
+    return (
+        "✅ WYKONANE ZADANIA\\n"
+        f"Dzisiaj: {daily['tasks']} zadań / {daily['batteries']} baterii\\n"
+        f"Tydzień: {weekly['tasks']} zadań / {weekly['batteries']} baterii\\n"
+        f"Okres tygodnia: {week_start.strftime('%d/%m %H:%M')} – {week_end.strftime('%d/%m %H:%M')}"
+    )
+
+
+def tasks_report_text():
+    day_start, day_end = day_bounds_for_tasks()
+    week_start, week_end = week_bounds_for_tasks()
+
+    daily = completed_tasks_count(day_start, day_end)
+    weekly = completed_tasks_count(week_start, week_end)
+
+    lines = [
+        "📊 LICZNIK WYKONANYCH ZADAŃ",
+        "",
+        f"📅 Dzisiaj: {daily['tasks']} zadań / {daily['batteries']} baterii",
+        "",
+        "🗓️ Tydzień:",
+        f"{week_start.strftime('%d/%m %H:%M')} – {week_end.strftime('%d/%m %H:%M')}",
+        f"{weekly['tasks']} zadań / {weekly['batteries']} baterii",
+    ]
+
+    if weekly["drivers"]:
+        lines.append("")
+        lines.append("Kierowcy w tym tygodniu:")
+        for name, item in sorted(weekly["drivers"].items(), key=lambda x: x[1]["tasks"], reverse=True):
+            lines.append(f"• {name}: {item['tasks']} zadań / {item['batteries']} baterii")
+
+    return "\\n".join(lines)
+
+
+
 def status_report():
     inv = load_inventory()
     depot = int(inv.get("depot_total", 0))
@@ -3613,6 +3709,9 @@ def help_text():
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
+
+    if t in ["zadania", "/zadania", "licznik", "/licznik", "tasks"]:
+        return tasks_report_text()
 
     # GLOBAL_G_COMMAND_EARLY
     # Komenda G musi działać przed obsługą flow/potwierdzeń.
