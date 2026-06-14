@@ -131,7 +131,7 @@ CHARGE_TIME_HOURS = 4.5
 MIN_CHARGE_TIME_HOURS = 3.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
-DRIVER_MAX_BATTERIES = 60
+DRIVER_MAX_BATTERIES = 70
 DRIVER_MIN_BATTERIES = 30
 DRIVER_LIMIT_STEP = 10
 DRIVER_ROUTE_TIME_LIMIT_HOURS = 6
@@ -672,8 +672,27 @@ def missing_inventory_check_text(user_id):
 
 
 
+
+def display_driver_name(name):
+    """Ujednolica wyświetlaną nazwę kierowcy bez zmiany ID ani JSON."""
+    if not name:
+        return name
+
+    clean = str(name).strip()
+    normalized = normalize_text(clean)
+
+    if normalized in [
+        "michal szczepanski",
+        "michal od szczepanski",
+        "michal od szczepanskiego",
+    ]:
+        return "Tofik"
+
+    return clean
+
+
 def get_driver_name(user):
-    return user.full_name or user.first_name or str(user.id)
+    return display_driver_name(user.full_name or user.first_name or str(user.id))
 
 
 def find_number_after(words, text):
@@ -826,7 +845,7 @@ def active_trip_details():
 
     for trip in db["trips"]:
         if trip.get("end") is None:
-            name = trip.get("driver", "Nieznany")
+            name = display_driver_name(trip.get("driver", "Nieznany"))
             details[name] = details.get(name, 0) + int(trip.get("qty", 0))
 
     return details
@@ -1050,7 +1069,7 @@ def completed_tasks_count(start_dt, end_dt):
         returned = int(trip.get("returned", trip.get("qty", 0)) or 0)
         batteries += returned
 
-        name = trip.get("driver", "Nieznany")
+        name = display_driver_name(trip.get("driver", "Nieznany"))
         item = drivers.setdefault(name, {"tasks": 0, "batteries": 0})
         item["tasks"] += 1
         item["batteries"] += returned
@@ -1142,7 +1161,7 @@ def status_report():
                 else:
                     late = abs(left_minutes)
                     left_txt = f"spóźnienie {late // 60}h {late % 60}min"
-                active_info.append((trip.get("driver", "Nieznany"), int(trip.get("qty", 0)), left_txt))
+                active_info.append((display_driver_name(trip.get("driver", "Nieznany")), int(trip.get("qty", 0)), left_txt))
 
         for driver, qty, left_txt in sorted(active_info):
             lines.append(f"• {driver}: {qty} baterii ({left_txt})")
@@ -1562,7 +1581,7 @@ def start_pickup_flow(user, chat_id, pending_qty=None):
     try:
         limit = get_driver_battery_limit(user)
     except Exception:
-        limit = 60
+        limit = 70
 
     data = load_driver_flow()
     data[str(user.id)] = {
@@ -1893,7 +1912,7 @@ def handle_driver_flow(text, user, chat_id):
             try:
                 limit = get_driver_battery_limit(user)
             except Exception:
-                limit = 60
+                limit = 70
 
             if qty > limit:
                 return (
@@ -3400,7 +3419,7 @@ def weekly_all_drivers_report():
         if end < start_period:
             continue
 
-        name = trip.get("driver", "Nieznany")
+        name = display_driver_name(trip.get("driver", "Nieznany"))
         s = summary.setdefault(name, {"batteries": 0, "trips": 0, "earned": 0.0, "late": 0, "hours": 0.0})
         s["batteries"] += int(trip.get("returned", 0))
         s["trips"] += 1
@@ -3599,7 +3618,7 @@ def clock_report():
                 state = "KONIEC CZASU ❌"
 
             lines.append(
-                f"• {trip.get('driver', 'Nieznany')}: {trip.get('qty', 0)} baterii | "
+                f"• {display_driver_name(trip.get('driver', 'Nieznany'))}: {trip.get('qty', 0)} baterii | "
                 f"start {fmt_dt(start)} | deadline {fmt_dt(deadline)} | {left_txt} | {state}"
             )
 
@@ -4315,7 +4334,7 @@ async def driver_alerts(app: Application):
                     start = datetime.fromisoformat(trip["start"])
                     deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
                     qty = int(trip.get("qty", 0))
-                    driver = trip.get("driver", "Nieznany")
+                    driver = display_driver_name(trip.get("driver", "Nieznany"))
                     chat_id = trip.get("chat_id") or load_group().get("chat_id")
 
                     if not chat_id:
