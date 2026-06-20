@@ -3729,6 +3729,18 @@ def help_text():
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
+    if t in ["fill", "/fill", "f"]:
+        moved = auto_move_waiting_to_chargers(chat_id)
+        inv = load_inventory()
+        return (
+            "🔌 UZUPEŁNIANIE ŁADOWAREK\n\n"
+            f"✅ Przeniesiono do ładowarek: {moved}\n\n"
+            f"📦 Gotowe: {int(inv.get('ready',0))}\n"
+            f"⏳ Oczekujące: {int(inv.get('waiting',0))}\n"
+            f"🔌 W ładowarkach: {int(inv.get('charging',0))}"
+        )
+
+
     if t in ["zadania", "/zadania", "licznik", "/licznik", "tasks"]:
         return tasks_report_text()
 
