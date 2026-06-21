@@ -13,7 +13,17 @@ from telegram.ext import Application, MessageHandler, ContextTypes, filters
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TELEGRAM_TOKEN:
-a
+    raise RuntimeError("Brak TELEGRAM_TOKEN w Railway Variables")
+DB_FILE = "telegram_db.json"
+INVENTORY_FILE = "telegram_inventory.json"
+CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
+GROUP_FILE = "telegram_group.json"
+DRIVER_CHECK_FILE = "telegram_driver_checks.json"
+DRIVER_FLOW_FILE = "telegram_driver_flow.json"
+WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
+DRIVERS_FILE = "telegram_drivers.json"
+AUDIT_FILE = "telegram_audit_log.json"
+DRIVER_LIMITS_FILE = "telegram_driver_limits.json"
 
 FILE_LOCK = threading.RLock()
 
@@ -1114,255 +1124,7 @@ def tasks_report_text():
 
 
 
-def charging_batch_jobs():
-    data = load_jobs()
-    jobs = []
-    for job in data.get("jobs", []):
-        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
-            try:
-                qty = int(job.get("qty", 0))
-                ready_at = datetime.fromisoformat(job["ready_at"])
-                start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-            except Exception:
-                continue
-            if qty > 0:
-                jobs.append((ready_at, start_at, job))
-    jobs.sort(key=lambda x: x[0])
-    return [job for _, _, job in jobs]
-
-
-def charging_job_elapsed_hours(job):
-    try:
-        start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-    except Exception:
-        return 0
-    return max(0, (now() - start_at).total_seconds() / 3600)
-
-
-def charging_job_elapsed_text(job):
-    minutes = int(charging_job_elapsed_hours(job) * 60)
-    return f"{minutes // 60}h {minutes % 60}min"
-
-
-def charging_job_can_remove(job):
-    return charging_job_elapsed_hours(job) >= MIN_CHARGE_TIME_HOURS
-
-
-def charging_time_left_text(ready_at):
-    seconds = int((ready_at - now()).total_seconds())
-    if seconds <= 0:
-        return "✅ gotowe do wyjęcia"
-    minutes = (seconds + 59) // 60
-    return f"zostało {minutes // 60}h {minutes % 60}min"
-
-
-def charging_min_time_left_text(job):
-    try:
-        start_at = datetime.fromisoformat(job.get("start_at", job["ready_at"]))
-    except Exception:
-        return ""
-    min_ready_at = start_at + timedelta(hours=MIN_CHARGE_TIME_HOURS)
-    seconds = int((min_ready_at - now()).total_seconds())
-    if seconds <= 0:
-        return ""
-    minutes = (seconds + 59) // 60
-    return f"minimum za {minutes // 60}h {minutes % 60}min"
-
-
-def charging_batches_report_text():
-    jobs = charging_batch_jobs()
-    if not jobs:
-        return "🔌 Brak aktywnych partii w ładowarkach."
-
-    lines = ["🔌 PARTIE W ŁADOWARKACH:"]
-    for job in jobs:
-        qty = int(job.get("qty", 0))
-        ready_at = datetime.fromisoformat(job["ready_at"])
-        left = charging_time_left_text(ready_at)
-        elapsed = charging_job_elapsed_text(job)
-
-        if charging_job_can_remove(job):
-            lines.append(f"• {qty} baterii — {left} — w ładowarce {elapsed}")
-        else:
-            min_left = charging_min_time_left_text(job)
-            lines.append(f"• {qty} baterii — {left} — w ładowarce {elapsed} — ⛔ {min_left}")
-
-    lines.append("\nMinimum do wyjęcia przez G: 3h 30min")
-    return "\n".join(lines)
-
-
-def nearest_removable_charging_job():
-    candidates = []
-    for job in charging_batch_jobs():
-        if not charging_job_can_remove(job):
-            continue
-        try:
-            ready_at = datetime.fromisoformat(job["ready_at"])
-        except Exception:
-            continue
-        candidates.append((ready_at, job))
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1] if candidates else None
-
-
-def parse_manual_charging_start(text):
-    t = normalize_text(text).strip()
-    if t in ["teraz", "now"]:
-        return now()
-
-    m = re.search(r"start\s*(\d{1,2})[:.;](\d{2})", text, re.IGNORECASE)
-    if not m:
-        m = re.search(r"(\d{1,2})[:.;](\d{2})", text)
-    if not m:
-        return now()
-
-    hour = int(m.group(1))
-    minute = int(m.group(2))
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return now()
-
-    dt = now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-    # Jeśli wpisano godzinę "z przyszłości" przy pracy nocnej, zostawiamy dzisiejszą.
-    return dt
-
-
-def add_charging_job_manual(chat_id, qty, start_at=None):
-    qty = int(qty)
-    if qty <= 0:
-        return None
-
-    if start_at is None:
-        start_at = now()
-
-    ready_at = start_at + timedelta(hours=CHARGE_TIME_HOURS)
-    alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
-
-    jobs_data = load_jobs()
-    jobs = jobs_data.setdefault("jobs", [])
-    jobs.append({
-        "id": len(jobs) + 1,
-        "qty": qty,
-        "chat_id": chat_id,
-        "start_at": start_at.isoformat(),
-        "ready_at": ready_at.isoformat(),
-        "alarm_at": alarm_at.isoformat(),
-        "alarm_sent": False,
-        "ready_sent": False,
-        "status": "charging",
-        "source": "manual_f"
-    })
-    save_jobs(jobs_data)
-    return jobs[-1]
-
-
-def manual_move_waiting_to_chargers(chat_id, qty, start_at=None):
-    inv = load_inventory()
-    waiting = int(inv.get("waiting", 0))
-    charging = int(inv.get("charging", 0))
-    free = charger_free_slots()
-
-    requested = int(qty)
-    move_qty = max(0, min(requested, waiting, free))
-    overflow = max(0, requested - move_qty)
-
-    if move_qty > 0:
-        inv["waiting"] = waiting - move_qty
-        inv["charging"] = charging + move_qty
-        save_inventory(inv)
-        add_charging_job_manual(chat_id, move_qty, start_at=start_at)
-
-    return {
-        "requested": requested,
-        "moved": move_qty,
-        "overflow": overflow,
-        "waiting_before": waiting,
-        "charging_before": charging,
-        "free_before": free,
-        "waiting_after": int(load_inventory().get("waiting", 0)),
-        "charging_after": int(load_inventory().get("charging", 0)),
-        "free_after": charger_free_slots(),
-    }
-
-
-def finish_nearest_g_batch(chat_id):
-    data = load_jobs()
-    jobs = data.get("jobs", [])
-
-    candidates = []
-    for index, job in enumerate(jobs):
-        if job.get("status") in ["charging", "alarm_sent"] and not job.get("ready_sent"):
-            try:
-                qty = int(job.get("qty", 0))
-                ready_at = datetime.fromisoformat(job["ready_at"])
-            except Exception:
-                continue
-
-            if qty > 0 and charging_job_can_remove(job):
-                candidates.append((ready_at, index, job))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    ready_at, index, job = candidates[0]
-    qty = int(job.get("qty", 0))
-
-    inv = load_inventory()
-    inv["charging"] = max(0, int(inv.get("charging", 0)) - qty)
-    inv["ready"] = int(inv.get("ready", 0)) + qty
-    save_inventory(inv)
-
-    jobs[index]["ready_sent"] = True
-    jobs[index]["status"] = "done"
-    jobs[index]["finished_by_g_at"] = now().isoformat()
-    save_jobs(data)
-
-    return {
-        "qty": qty,
-        "ready_at": ready_at,
-    }
-
-
-def start_g_command_flow(user, chat_id):
-    report = charging_batches_report_text()
-    job = nearest_removable_charging_job()
-
-    if not job:
-        return (
-            "🔋 RAPORT ŁADOWAREK — G\n\n"
-            f"{report}\n\n"
-            "Nie ma jeszcze partii gotowej do wyjęcia przez G."
-        )
-
-    qty = int(job.get("qty", 0))
-    ready_at = datetime.fromisoformat(job["ready_at"])
-    left = charging_time_left_text(ready_at)
-    elapsed = charging_job_elapsed_text(job)
-
-    data = load_driver_flow()
-    data[str(user.id)] = {
-        "type": "g_ready_batch",
-        "chat_id": chat_id,
-        "step": "confirm",
-        "driver": get_driver_name(user),
-        "created_at": now().isoformat(),
-        "qty": qty,
-    }
-    save_driver_flow(data)
-
-    return (
-        (
-            "🔋 RAPORT ŁADOWAREK — G\n\n"
-            f"{report}\n\n"
-            "🟢 NAJBLIŻSZA PARTIA DO WYJĘCIA:\n"
-            f"• {qty} baterii — {left} — w ładowarce {elapsed}\n\n"
-            "Kliknij 🟢 OK, jeśli wyjmujesz tę partię."
-        ),
-        get_confirm_keyboard()
-    )
-
-
-def start_f_command_flow(user, chat_id):
+def start_manual_fill_flow(user, chat_id):
     inv = load_inventory()
     waiting = int(inv.get("waiting", 0))
     charging = int(inv.get("charging", 0))
@@ -1370,7 +1132,7 @@ def start_f_command_flow(user, chat_id):
 
     data = load_driver_flow()
     data[str(user.id)] = {
-        "type": "f_fill_manual",
+        "type": "manual_fill",
         "chat_id": chat_id,
         "step": "qty",
         "driver": get_driver_name(user),
@@ -1379,14 +1141,42 @@ def start_f_command_flow(user, chat_id):
     save_driver_flow(data)
 
     return (
-        "🔌 WKŁADANIE DO ŁADOWAREK — F\n\n"
+        "🔌 UZUPEŁNIANIE ŁADOWAREK\n\n"
         f"⏳ Oczekujące: {waiting}\n"
         f"🔌 W ładowarkach: {charging}\n"
         f"🟢 Wolne porty: {free}\n\n"
-        "Ile baterii wkładasz do ładowarek?\n\n"
-        "Możesz też wpisać od razu z godziną, np.:\n"
-        "40 start 8:00"
+        "Ile baterii wkładasz do ładowarek?"
     )
+
+
+def manual_fill_chargers(chat_id, qty):
+    inv = load_inventory()
+    waiting = int(inv.get("waiting", 0))
+    charging = int(inv.get("charging", 0))
+    free = charger_free_slots()
+
+    requested = int(qty)
+    moved = max(0, min(requested, waiting, free))
+    not_moved = max(0, requested - moved)
+
+    if moved > 0:
+        inv["waiting"] = waiting - moved
+        inv["charging"] = charging + moved
+        save_inventory(inv)
+        add_charging_job_from_return(chat_id, moved)
+
+    inv_after = load_inventory()
+    return {
+        "requested": requested,
+        "moved": moved,
+        "not_moved": not_moved,
+        "waiting_before": waiting,
+        "charging_before": charging,
+        "free_before": free,
+        "waiting_after": int(inv_after.get("waiting", 0)),
+        "charging_after": int(inv_after.get("charging", 0)),
+        "free_after": charger_free_slots(),
+    }
 
 
 
@@ -2103,6 +1893,38 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    if t in ["f", "/f", "fill", "/fill"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        clear_driver_flow(user.id)
+        return start_manual_fill_flow(user, chat_id)
+
+    if flow and flow.get("type") == "manual_fill":
+        if flow.get("step") == "qty":
+            qty = number_from_text(text)
+            if qty is None:
+                return "Wpisz liczbę baterii, np. 18"
+            if qty < 1:
+                return "Minimum to 1 bateria."
+
+            result = manual_fill_chargers(chat_id, qty)
+            clear_driver_flow(user.id)
+
+            extra = ""
+            if result["not_moved"] > 0:
+                extra = f"\n⚠️ Nie weszło: {result['not_moved']} — brak miejsca albo za mało oczekujących.\n"
+
+            return (
+                "✅ ŁADOWARKI UZUPEŁNIONE\n\n"
+                f"Chciałeś włożyć: {result['requested']}\n"
+                f"Przeniesiono do ładowarek: {result['moved']}\n"
+                f"{extra}\n"
+                f"⏳ Oczekujące: {result['waiting_after']}\n"
+                f"🔌 W ładowarkach: {result['charging_after']}\n"
+                f"🟢 Wolne porty: {result['free_after']}"
+            )
+
+
     # GLOBAL_G_COMMAND_IN_FLOW
     # G ma otworzyć raport nawet gdy użytkownik ma stary flow.
     if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
@@ -2146,60 +1968,6 @@ def handle_driver_flow(text, user, chat_id):
                 f"✅ PARTIA WYJĘTA Z ŁADOWAREK\n\n"
                 f"📦 Dodano do gotowych: {result['qty']}\n"
                 f"{moved_line}\n"
-                f"{status_report()}"
-            )
-
-
-    # FLOW: F — ręczne wkładanie określonej ilości do ładowarek
-    if flow.get("type") == "f_fill_manual":
-        if flow["step"] == "qty":
-            qty = number_from_text(text)
-            if qty is None:
-                return "Wpisz liczbę baterii, np. 40 albo 40 start 8:00"
-            if qty < 1:
-                return "Minimum to 1 bateria."
-
-            start_at = parse_manual_charging_start(text)
-            result = manual_move_waiting_to_chargers(chat_id, qty, start_at=start_at)
-            clear_driver_flow(user.id)
-
-            moved = int(result["moved"])
-            overflow = int(result["overflow"])
-            overflow_line = (
-                f"\n⚠️ Nie dało się włożyć wszystkich. Nieprzeniesione: {overflow}\n"
-                if overflow > 0 else ""
-            )
-
-            return (
-                f"✅ ŁADOWARKI UZUPEŁNIONE\n\n"
-                f"Chciałeś włożyć: {result['requested']}\n"
-                f"Do ładowarek weszło: {moved}\n"
-                f"Start ładowania: {start_at.strftime('%H:%M')}\n"
-                f"{overflow_line}\n"
-                f"⏳ Oczekujące: {result['waiting_after']}\n"
-                f"🔌 W ładowarkach: {result['charging_after']}\n"
-                f"🟢 Wolne porty: {result['free_after']}\n\n"
-                f"{charging_batches_report_text()}"
-            )
-
-    # FLOW: G — wyjęcie najbliższej partii z ładowarek
-    if flow.get("type") == "g_ready_batch":
-        if flow["step"] == "confirm":
-            if not is_ok_text(t):
-                return (
-                    "Kliknij 🟢 OK, żeby wyjąć podświetloną partię, albo 🔴 Cancel.",
-                    get_confirm_keyboard()
-                )
-
-            result = finish_nearest_g_batch(chat_id)
-            clear_driver_flow(user.id)
-
-            if not result:
-                return "🔌 Nie ma partii spełniającej minimum 3h30."
-
-            return (
-                f"✅ PARTIA WYJĘTA Z ŁADOWAREK\n\n"
-                f"📦 Dodano do gotowych: {result['qty']}\n\n"
                 f"{status_report()}"
             )
 
@@ -4050,47 +3818,12 @@ def help_text():
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
-    # GLOBAL F/G COMMANDS
-    if t in ["f", "/f", "fill", "/fill", "uzupelnij", "uzupełnij"]:
+    # SAFE F COMMAND
+    if t in ["f", "/f", "fill", "/fill"]:
         if not is_admin(user):
             return "❌ Brak dostępu."
         clear_driver_flow(user.id)
-        return start_f_command_flow(user, chat_id)
-
-
-    # MANUAL CHARGING BATCH: ladowarki 40 start 8:00
-    if re.match(r"^(ladowarki|ładowarki)\s+\d+", t):
-        if not is_admin(user):
-            return "❌ Brak dostępu."
-
-        qty = number_from_text(text)
-        if qty is None or qty < 1:
-            return "Użycie: ladowarki 40 start 8:00"
-
-        start_at = parse_manual_charging_start(text)
-        result = manual_move_waiting_to_chargers(chat_id, qty, start_at=start_at)
-
-        overflow = int(result["overflow"])
-        overflow_line = (
-            f"\n⚠️ Nie dało się włożyć wszystkich. Nieprzeniesione: {overflow}\n"
-            if overflow > 0 else ""
-        )
-
-        return (
-            f"✅ DODANO PARTIĘ ŁADOWANIA\n\n"
-            f"Chciałeś włożyć: {result['requested']}\n"
-            f"Do ładowarek weszło: {result['moved']}\n"
-            f"Start: {start_at.strftime('%H:%M')}\n"
-            f"{overflow_line}\n"
-            f"⏳ Oczekujące: {result['waiting_after']}\n"
-            f"🔌 W ładowarkach: {result['charging_after']}\n"
-            f"🟢 Wolne porty: {result['free_after']}\n\n"
-            f"{charging_batches_report_text()}"
-        )
-
-    if t in ["g", "/g", "gotowe z ladowarek", "gotowe z ładowarek"]:
-        clear_driver_flow(user.id)
-        return start_g_command_flow(user, chat_id)
+        return start_manual_fill_flow(user, chat_id)
 
 
     if t in ["fill", "/fill", "f"]:
