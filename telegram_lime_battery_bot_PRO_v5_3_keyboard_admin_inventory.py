@@ -459,7 +459,7 @@ def driver_search(query):
     # Safety guard: two drivers have the same first name.
     # Plain "michal" is ambiguous, so require a surname/code/alias:
     # "pietrzak", "surmacz", "michal p", "michal s", "2", or "3".
-    if q in {"michal", "michał"}:
+    if q in {"michał"}:
         return []
 
     results = []
@@ -674,25 +674,64 @@ def missing_inventory_check_text(user_id):
 
 
 def display_driver_name(name):
-    """Ujednolica wyświetlaną nazwę kierowcy bez zmiany ID ani JSON."""
+    """Ujednolica wyświetlaną nazwę kierowcy."""
     if not name:
         return name
 
     clean = str(name).strip()
     normalized = normalize_text(clean)
 
-    if normalized in [
-        "michal szczepanski",
-        "michal od szczepanski",
-        "michal od szczepanskiego",
-    ]:
-        return "Tofik"
+    mapping = {
+        "michal szczepanski": "Tofik",
+        "michal od szczepanski": "Tofik",
+        "michal od szczepanskiego": "Tofik",
+        "michal surmacz": "Surmacz",
+        "surmacz": "Surmacz",
+        "michal pietrzak": "Pietrzak",
+        "pietrzak": "Pietrzak",
+    }
 
-    return clean
+    return mapping.get(normalized, clean)
+
+
+
+def get_driver_from_book_by_user_id(user_id):
+    """Zwraca wpis z DRIVER_ID_BOOK po Telegram ID. To jest źródło prawdy dla kierowcy."""
+    uid = str(user_id)
+    for key, item in DRIVER_ID_BOOK.items():
+        if str(item.get("id", "")).strip() == uid and uid:
+            return key, item
+    return None, None
+
+
+def get_driver_name_by_user_id(user):
+    """
+    Kierowca wysyłający wiadomość jest identyfikowany po Telegram ID.
+    Imię/nazwisko wpisane w tekście nie decyduje o tym, kto robi pickup/return.
+    """
+    key, item = get_driver_from_book_by_user_id(user.id)
+    if item:
+        return display_driver_name(item.get("name", get_telegram_display_name(user)))
+    return display_driver_name(get_telegram_display_name(user))
+
+
+def get_telegram_display_name(user):
+    if getattr(user, "full_name", None):
+        return user.full_name
+    if getattr(user, "first_name", None):
+        return user.first_name
+    return str(user.id)
+
 
 
 def get_driver_name(user):
-    return display_driver_name(user.full_name or user.first_name or str(user.id))
+    """
+    Najważniejsza zasada:
+    - jeśli Telegram ID jest w DRIVER_ID_BOOK, używamy nazwy z tego ID,
+    - tekst wpisany przez kierowcę NIE wybiera kierowcy,
+    - aliasy są tylko dla komend admina / ręcznego wyboru.
+    """
+    return get_driver_name_by_user_id(user)
 
 
 def find_number_after(words, text):
@@ -1066,7 +1105,7 @@ def completed_tasks_count(start_dt, end_dt):
             continue
 
         count += 1
-        returned = int(trip.get("returned", trip.get("qty", 0)) or 0)
+        returned = trip_work_qty(trip)
         batteries += returned
 
         name = display_driver_name(trip.get("driver", "Nieznany"))
@@ -1178,6 +1217,18 @@ def manual_fill_chargers(chat_id, qty):
         "free_after": charger_free_slots(),
     }
 
+
+
+
+def trip_work_qty(trip):
+    """
+    Ile baterii liczyć kierowcy jako zrobione.
+    Gotowe przywiezione NIE są pracą kierowcy.
+    """
+    try:
+        return int(trip.get("work_qty", max(0, int(trip.get("returned", 0)) - int(trip.get("ready_returned", 0)))))
+    except Exception:
+        return int(trip.get("returned", 0) or 0)
 
 
 def status_report():
@@ -2489,6 +2540,7 @@ def handle_driver_flow(text, user, chat_id):
             trip["end"] = end_time.isoformat()
             trip["returned"] = returned
             trip["ready_returned"] = ready_returned
+            trip["work_qty"] = max(0, returned - ready_returned)
             trip["used_returned"] = used_returned
             trip["charged_inside"] = ready_returned
             trip["hours"] = hours
@@ -2535,6 +2587,7 @@ def handle_driver_flow(text, user, chat_id):
                 f"Pobrane: {original_qty}\n"
                 f"Oddane razem: {returned}\n"
                 f"Gotowe przywiezione: {ready_returned}\n"
+                f"Zrobione do statystyk: {max(0, returned - ready_returned)}\n"
                 f"Do ładowarek: {to_charging}\n"
                 f"Oczekujące: {to_waiting}\n"
                 f"{auto_move_line}"
@@ -3273,58 +3326,21 @@ def driver_aliases_for_user(user):
 
 def active_trip(db, user_id, user=None):
     """
-    Finds an active route safely.
-
-    1) Exact Telegram ID is always preferred.
-    2) Fallback by driver aliases is used only for manual/restored routes.
-       It does NOT match by a single common token like "michal", because that
-       can attach the wrong route when there are two drivers with similar names.
+    Szuka aktywnej trasy po Telegram ID.
+    Fallback po nazwie jest tylko dla starych rekordów bez user_id.
     """
-    user_id = str(user_id)
+    uid = str(user_id)
 
-    # 1) Main safe match: exact Telegram ID.
-    for trip in reversed(db["trips"]):
-        if trip.get("end") is None and str(trip.get("user_id", "")) == user_id:
+    for trip in db.get("trips", []):
+        if trip.get("end") is None and str(trip.get("user_id", "")) == uid:
             return trip
 
-    # 2) Safe fallback for restored/manual routes where Telegram ID in trip is wrong.
-    aliases = driver_aliases_for_user(user)
-    if aliases:
-        clean_aliases = {
-            normalize_text(str(a)).strip().lstrip("@")
-            for a in aliases
-            if a and len(normalize_text(str(a)).strip()) >= 3
-        }
-
-        matches = []
-        for trip in reversed(db["trips"]):
-            if trip.get("end") is not None:
-                continue
-
-            driver = normalize_text(str(trip.get("driver", ""))).strip()
-            if not driver:
-                continue
-
-            matched = False
-            for alias in clean_aliases:
-                # exact alias/name match
-                if alias == driver:
-                    matched = True
-                    break
-
-                # contains match only for longer, specific names
-                # e.g. "michal kierowca od dobosza" <-> "michal pietrzak" will NOT match
-                # unless that exact alias was added in DRIVER_ID_BOOK.
-                if len(alias) >= 6 and len(driver) >= 6 and (alias in driver or driver in alias):
-                    matched = True
-                    break
-
-            if matched:
-                matches.append(trip)
-
-        # Only return fallback if it is unambiguous.
-        if len(matches) == 1:
-            return matches[0]
+    # Fallback dla starszych tras, które nie mają user_id.
+    if user is not None:
+        current_name = get_driver_name(user)
+        for trip in db.get("trips", []):
+            if trip.get("end") is None and display_driver_name(trip.get("driver", "")) == current_name:
+                return trip
 
     return None
 
@@ -3471,7 +3487,7 @@ def driver_report(driver_query, period="dzis"):
             continue
 
         matched_name = driver
-        batteries += int(trip.get("returned", 0))
+        batteries += trip_work_qty(trip)
         trips += 1
         earned += float(trip.get("earned", 0))
         hours_total += float(trip.get("hours", 0))
@@ -3510,7 +3526,7 @@ def weekly_all_drivers_report():
 
         name = display_driver_name(trip.get("driver", "Nieznany"))
         s = summary.setdefault(name, {"batteries": 0, "trips": 0, "earned": 0.0, "late": 0, "hours": 0.0})
-        s["batteries"] += int(trip.get("returned", 0))
+        s["batteries"] += trip_work_qty(trip)
         s["trips"] += 1
         s["earned"] += float(trip.get("earned", 0))
         s["hours"] += float(trip.get("hours", 0))
@@ -3576,7 +3592,7 @@ def report(period="dzis"):
             continue
 
         s = summary.setdefault(trip["driver"], {"batteries": 0, "trips": 0, "earned": 0.0, "late": 0, "hours": 0.0})
-        s["batteries"] += int(trip.get("returned", 0))
+        s["batteries"] += trip_work_qty(trip)
         s["trips"] += 1
         s["earned"] += float(trip.get("earned", 0))
         s["hours"] += float(trip.get("hours", 0))
@@ -3628,7 +3644,7 @@ def leaderboard(period="dzis"):
             continue
         if datetime.fromisoformat(trip["end"]) < start_period:
             continue
-        scores[trip["driver"]] = scores.get(trip["driver"], 0) + int(trip.get("returned", 0))
+        scores[trip["driver"]] = scores.get(trip["driver"], 0) + trip_work_qty(trip)
 
     if not scores:
         return f"🏆 RANKING {title}\nBrak danych."
@@ -3814,6 +3830,44 @@ def help_text():
         "raport tydzien Jan Kowalski\n"
         "Raport tygodniowy firmy idzie automatycznie w poniedziałek o 06:00.\n"
     )
+
+
+def resolve_driver_for_admin(query):
+    """
+    Tylko admin używa aliasów.
+    Jeżeli zapytanie jest niejednoznaczne, zwracamy listę kandydatów zamiast zgadywać.
+    """
+    q = normalize_text(query).strip()
+    matches = []
+
+    for key, item in DRIVER_ID_BOOK.items():
+        name = item.get("name", "")
+        aliases = item.get("aliases", [])
+        values = [key, name] + aliases
+        normalized_values = [normalize_text(str(v)).strip() for v in values if v]
+
+        if q in normalized_values:
+            matches.append((key, item))
+            continue
+
+        # Dopuszczamy częściowe dopasowanie tylko jeśli nie jest to samo "michal".
+        if q and q != "michal":
+            if any(q in v for v in normalized_values):
+                matches.append((key, item))
+
+    if len(matches) == 1:
+        return matches[0][1], None
+
+    if len(matches) > 1:
+        lines = ["Znalazłem kilku kierowców. Nie zgaduję:", ""]
+        for key, item in matches:
+            lines.append(f"{key}. {display_driver_name(item.get('name', 'Nieznany'))}")
+        lines.append("")
+        lines.append("Wpisz dokładniej: surmacz / pietrzak / tofik albo numer z listy.")
+        return None, "\\n".join(lines)
+
+    return None, "Nie znalazłem kierowcy. Użyj dokładnego aliasu, np. surmacz, pietrzak, tofik."
+
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
