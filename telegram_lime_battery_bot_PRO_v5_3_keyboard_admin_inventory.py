@@ -4342,6 +4342,73 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
+    # ADMIN_RESET_COMPANY_WAREHOUSE
+    if t in ["reset lima", "lima reset"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        inv = load_company_inventory()
+        inv.setdefault("companies", {})["lima"] = {
+            "total": 0,
+            "ready": 0,
+            "charging": 0,
+            "waiting": 0,
+        }
+        save_inventory(inv)
+        clear_driver_flow(user.id)
+
+        return (
+            "🧹 RESET LIMA WYKONANY\n\n"
+            "LIMA ustawiona na zero.\n\n"
+            f"{status_report()}"
+        )
+
+    if t in ["reset voi", "voi reset"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        inv = load_company_inventory()
+        inv.setdefault("companies", {})["voi"] = {
+            "total": 0,
+            "ready": 0,
+            "charging": 0,
+            "waiting": 0,
+        }
+        save_inventory(inv)
+        clear_driver_flow(user.id)
+
+        return (
+            "🧹 RESET VOI WYKONANY\n\n"
+            "VOI ustawione na zero.\n\n"
+            f"{status_report()}"
+        )
+
+    if t in ["reset all", "reset wszystko", "reset magazyn", "reset magazynu"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        inv = load_company_inventory()
+        inv["companies"] = {
+            "lima": {"total": 0, "ready": 0, "charging": 0, "waiting": 0},
+            "voi": {"total": 0, "ready": 0, "charging": 0, "waiting": 0},
+        }
+        inv["depot_total"] = 0
+        inv["ready"] = 0
+        inv["charging"] = 0
+        inv["waiting"] = 0
+        save_inventory(inv)
+
+        # Czyścimy aktywne flow, ale nie usuwamy historii tras ani kierowców.
+        clear_driver_flow(user.id)
+
+        return (
+            "🧹 RESET MAGAZYNU WYKONANY\n\n"
+            "LIMA i VOI ustawione na zero.\n"
+            "Historia tras i kierowcy zostają bez zmian.\n\n"
+            f"{status_report()}"
+        )
+
+
     # FINAL_SIMPLE_WAREHOUSE_HOOK
     manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
     if manual_result is not None:
