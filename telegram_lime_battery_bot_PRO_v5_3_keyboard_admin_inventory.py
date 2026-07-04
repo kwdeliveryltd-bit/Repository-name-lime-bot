@@ -2304,7 +2304,7 @@ def handle_driver_flow(text, user, chat_id):
 
             return (
                 (
-                    "✅ PODSUMOWANIE PICKUP — {brand_label(brand).upper()}\n\n"
+                    f"✅ PODSUMOWANIE PICKUP — {brand_label(brand).upper()}\n\n"
                     f"📦 Gotowe teraz: {ready}\n"
                     f"🔌 W ładowarkach: {charging}\n"
                     f"⏳ Oczekujące: {waiting}\n\n"
@@ -5096,6 +5096,37 @@ async def post_init(app: Application):
     asyncio.create_task(charging_scheduler(app))
     asyncio.create_task(driver_alerts(app))
     asyncio.create_task(weekly_report_scheduler(app))
+
+
+# FINAL_BRAND_COMPANY_BRIDGE
+# Stare fragmenty pickup/return używają brand_item(inv, brand).
+# Nowy magazyn używa inv["companies"]. Ten most sprawia, że oba czytają to samo.
+def brand_item(inv, brand):
+    comp = company_key(brand)
+    companies = inv.setdefault("companies", {})
+    item = companies.setdefault(comp, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+    item.setdefault("total", 0)
+    item.setdefault("ready", 0)
+    item.setdefault("charging", 0)
+    item.setdefault("waiting", 0)
+    return item
+
+
+def manual_inventory_total_from_brands(inv):
+    companies = inv.setdefault("companies", {})
+    for comp in ["lima", "voi"]:
+        item = companies.setdefault(comp, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        item.setdefault("total", 0)
+        item.setdefault("ready", 0)
+        item.setdefault("charging", 0)
+        item.setdefault("waiting", 0)
+
+    # Zostawiamy top-level tylko jako kompatybilność dla starych fragmentów.
+    inv["depot_total"] = sum(int(companies[b].get("total", 0)) for b in ["lima", "voi"])
+    inv["ready"] = sum(int(companies[b].get("ready", 0)) for b in ["lima", "voi"])
+    inv["charging"] = sum(int(companies[b].get("charging", 0)) for b in ["lima", "voi"])
+    inv["waiting"] = sum(int(companies[b].get("waiting", 0)) for b in ["lima", "voi"])
+    return inv
 
 
 def main():
