@@ -309,7 +309,7 @@ def load_inventory():
         item.setdefault("charging", 0)
         item.setdefault("waiting", 0)
 
-    return inv
+    return manual_inventory_total_from_brands(inv)
 
 
 def save_inventory(inv):
@@ -1270,22 +1270,93 @@ def brand_label(brand):
     return "Lima" if brand == "lima" else "Voi"
 
 
+
+def normalize_brand(value):
+    t = normalize_text(str(value or "")).strip()
+    if t in ["lima", "lim", "lime", "🟢 lime", "🟢 lima"]:
+        return "lima"
+    if t in ["voi", "woi", "voy", "🔵 voi"]:
+        return "voi"
+    return None
+
+
+def get_brand_keyboard():
+    return ReplyKeyboardMarkup(
+        [["🟢 Lima"], ["🔵 Voi"], ["🔴 Cancel"]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+def brand_item(inv, brand):
+    brands = inv.setdefault("brands", {})
+    item = brands.setdefault(brand, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+    item.setdefault("total", 0)
+    item.setdefault("ready", 0)
+    item.setdefault("charging", 0)
+    item.setdefault("waiting", 0)
+    return item
+
+
+def trip_company(trip):
+    return normalize_brand(trip.get("company") or trip.get("brand") or "lima") or "lima"
+
+
+def active_in_transit_by_brand():
+    db = load_db()
+    totals = {"lima": 0, "voi": 0}
+    for trip in db.get("trips", []):
+        if trip.get("end") is None:
+            brand = trip_company(trip)
+            totals[brand] = totals.get(brand, 0) + int(trip.get("qty", 0))
+    return totals
+
+
+def brand_summary_lines(inv=None):
+    if inv is None:
+        inv = load_inventory()
+
+    transit = active_in_transit_by_brand()
+    lines = []
+    for brand in ["lima", "voi"]:
+        item = brand_item(inv, brand)
+        total = int(item.get("total", 0))
+        ready = int(item.get("ready", 0))
+        charging = int(item.get("charging", 0))
+        waiting = int(item.get("waiting", 0))
+        in_route = int(transit.get(brand, 0))
+        counted = ready + charging + waiting + in_route
+        diff = total - counted
+        icon = "🟢" if brand == "lima" else "🔵"
+
+        lines += [
+            f"{icon} {brand_label(brand).upper()}",
+            f"🏢 Ilość: {total}",
+            f"📦 Gotowe: {ready}",
+            f"🔌 Włożone do ładowania: {charging}",
+            f"⏳ Oczekujące: {waiting}",
+            f"🚗 W trasie: {in_route}",
+            f"🧮 Razem policzone: {counted}",
+        ]
+
+        if diff == 0:
+            lines.append("✅ Zgadza się")
+        elif diff > 0:
+            lines.append(f"⚠️ Brakuje: {diff}")
+        else:
+            lines.append(f"🚨 Nadwyżka: {abs(diff)}")
+        lines.append("")
+
+    return lines
+
+
+
 def brand_inventory_text(inv=None):
     if inv is None:
         inv = load_inventory()
-    brands = inv.get("brands", {})
-
-    lines = ["", "🏷️ STANY RĘCZNE"]
-    for brand in ["lima", "voi"]:
-        item = brands.get(brand, {})
-        lines.append(
-            f"{brand_label(brand)} — "
-            f"ilość: {int(item.get('total', 0))}, "
-            f"gotowe: {int(item.get('ready', 0))}, "
-            f"włożone: {int(item.get('charging', 0))}, "
-            f"oczekujące: {int(item.get('waiting', 0))}"
-        )
-    return "\n".join(lines)
+    lines = ["", "🏷️ OSOBNE MAGAZYNY"]
+    lines.extend(brand_summary_lines(inv))
+    return "\n".join(lines).rstrip()
 
 
 def set_brand_inventory_command(text):
@@ -1395,66 +1466,57 @@ def disabled_charging_module_message():
 def status_report():
     inv = load_inventory()
     depot = int(inv.get("depot_total", 0))
-    ready = int(inv.get("ready", 0))
-    waiting = int(inv.get("waiting", 0))
-    charging = int(inv.get("charging", 0))
     transit = active_in_transit()
-    counted = ready + waiting + charging + transit
-    diff = depot - counted
 
     lines = [
         "📊 STATUS",
         "",
-        f"🏢 Depo total: {depot}",
+        f"🏢 Depo total razem: {depot}",
         "",
-        f"📦 Gotowe: {ready}",
-        f"⏳ Oczekujące: {waiting}",
-        f"🔌 Włożone do ładowania: {charging}",
-        f"🚗 W trasie: {transit}",
     ]
 
-    lines.append(brand_inventory_text(inv))
+    lines.extend(brand_summary_lines(inv))
 
-    transit_details = active_trip_details()
-    if transit_details:
-        lines.append("")
+    db = load_db()
+    current = now()
+    active_info = []
+    for trip in db.get("trips", []):
+        if trip.get("end") is None:
+            start = datetime.fromisoformat(trip["start"])
+            deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
+            left_minutes = int((deadline - current).total_seconds() // 60)
+            if left_minutes >= 0:
+                left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
+            else:
+                late = abs(left_minutes)
+                left_txt = f"spóźnienie {late // 60}h {late % 60}min"
+            brand = trip_company(trip)
+            active_info.append((display_driver_name(trip.get("driver", "Nieznany")), int(trip.get("qty", 0)), left_txt, brand))
+
+    if active_info:
         lines.append("Kierowcy w trasie:")
-        db = load_db()
-        current = now()
-        active_info = []
-        for trip in db["trips"]:
-            if trip.get("end") is None:
-                start = datetime.fromisoformat(trip["start"])
-                deadline = start + timedelta(hours=trip_time_limit_hours(trip.get("qty", 0)))
-                left_minutes = int((deadline - current).total_seconds() // 60)
-                if left_minutes >= 0:
-                    left_txt = f"zostało {left_minutes // 60}h {left_minutes % 60}min"
-                else:
-                    late = abs(left_minutes)
-                    left_txt = f"spóźnienie {late // 60}h {late % 60}min"
-                active_info.append((display_driver_name(trip.get("driver", "Nieznany")), int(trip.get("qty", 0)), left_txt))
+        for driver, qty, left_txt, brand in sorted(active_info):
+            icon = "🟢" if brand == "lima" else "🔵"
+            lines.append(f"• {icon} {driver}: {qty} baterii ({left_txt})")
+        lines.append("")
 
-        for driver, qty, left_txt in sorted(active_info):
-            lines.append(f"• {driver}: {qty} baterii ({left_txt})")
+    total_counted = sum(
+        int(brand_item(inv, b).get("ready", 0)) +
+        int(brand_item(inv, b).get("charging", 0)) +
+        int(brand_item(inv, b).get("waiting", 0))
+        for b in ["lima", "voi"]
+    ) + transit
+    diff = depot - total_counted
 
-    lines += [
-        "",
-        f"🧮 Razem policzone: {counted}",
-    ]
-
-    if diff > 0:
-        lines.append(f"⚠️ Brakuje do depo: {diff}")
-    elif diff < 0:
-        lines.append(f"🚨 Nadwyżka ponad depo: {abs(diff)}")
-    else:
+    lines.append(f"🧮 Razem wszystko: {total_counted}")
+    if diff == 0:
         lines.append("✅ Zgadza się z depo")
-
-    # Alarm "mało gotowych baterii" wyłączony na życzenie — status ma nie spamować takim komunikatem.
+    elif diff > 0:
+        lines.append(f"⚠️ Brakuje do depo: {diff}")
+    else:
+        lines.append(f"🚨 Nadwyżka ponad depo: {abs(diff)}")
 
     return "\n".join(lines)
-
-
-
 
 
 def parse_time_today(time_text):
@@ -1838,54 +1900,25 @@ def clear_driver_flow(user_id):
 
 def start_pickup_flow(user, chat_id, pending_qty=None):
     """
-    Prosty pickup:
-    - pokazuje cały stan od razu,
-    - pyta tylko ile kierowca zabiera,
-    - zmianę stanu robi dopiero przez ✏️ Edit w podsumowaniu.
+    Pickup z wyborem magazynu: Lima albo Voi.
     """
-    inv = load_inventory()
-
-    ready = int(inv.get("ready", 0))
-    charging = int(inv.get("charging", 0))
-    waiting = int(inv.get("waiting", 0))
-
-    try:
-        limit = get_driver_battery_limit(user)
-    except Exception:
-        limit = 70
-
     data = load_driver_flow()
     data[str(user.id)] = {
-        "type": "pickup_simple",
+        "type": "pickup_brand",
         "chat_id": chat_id,
-        "step": "take_qty",
+        "step": "brand",
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
-        "ready": ready,
-        "charging": charging,
-        "waiting": waiting,
         "qty": pending_qty,
     }
     save_driver_flow(data)
 
-    if pending_qty:
-        return (
-            "🚗 PICKUP\n\n"
-            f"📦 Gotowe: {ready}\n"
-            f"🔌 W ładowarkach: {charging}\n"
-            f"⏳ Oczekujące: {waiting}\n\n"
-            f"🚦 Twój limit: {limit}\n"
-            f"🚗 Chcesz zabrać: {pending_qty}\n\n"
-            "Wpisz tę liczbę jeszcze raz albo wpisz inną."
-        )
-
     return (
         "🚗 PICKUP\n\n"
-        f"📦 Gotowe: {ready}\n"
-        f"🔌 W ładowarkach: {charging}\n"
-        f"⏳ Oczekujące: {waiting}\n\n"
-        f"🚦 Twój limit: {limit}\n\n"
-        "Ile baterii zabierasz?"
+        "Dla której firmy pobierasz baterie?\n\n"
+        "🟢 Lima\n"
+        "🔵 Voi",
+        get_brand_keyboard()
     )
 
 
@@ -2014,6 +2047,8 @@ def start_return_flow(user, chat_id, returned_qty=None):
     if route_qty < 1:
         return "Brak baterii w aktywnej trasie."
 
+    brand = trip_company(trip)
+
     data = load_driver_flow()
     data[str(user.id)] = {
         "type": "return_auto",
@@ -2022,6 +2057,7 @@ def start_return_flow(user, chat_id, returned_qty=None):
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
         "route_qty": route_qty,
+        "brand": brand,
         "returned": None,
         "ready_returned": 0,
         "used_returned": 0,
@@ -2033,11 +2069,12 @@ def start_return_flow(user, chat_id, returned_qty=None):
     save_driver_flow(data)
 
     return (
-        f"🔁 KONTROLA ZWROTU\n\n"
+        f"🔁 KONTROLA ZWROTU — {brand_label(brand).upper()}\n\n"
         f"Masz w trasie: {route_qty} baterii.\n\n"
         "1/3 Ile baterii oddajesz RAZEM?\n"
         "Potem podasz, ile z nich jest GOTOWYCH."
     )
+
 
 def number_from_text(text):
     match = re.search(r"\d+", text or "")
@@ -2181,6 +2218,49 @@ def handle_driver_flow(text, user, chat_id):
             return "Liczba nie może być ujemna."
 
 
+
+    if flow.get("type") == "pickup_brand":
+        if flow["step"] == "brand":
+            brand = normalize_brand(t)
+            if not brand:
+                return (
+                    "Wybierz firmę:\n\n"
+                    "🟢 Lima\n"
+                    "🔵 Voi",
+                    get_brand_keyboard()
+                )
+
+            inv = load_inventory()
+            item = brand_item(inv, brand)
+            ready = int(item.get("ready", 0))
+            charging = int(item.get("charging", 0))
+            waiting = int(item.get("waiting", 0))
+
+            try:
+                limit = get_driver_battery_limit(user)
+            except Exception:
+                limit = 70
+
+            flow["type"] = "pickup_simple"
+            flow["step"] = "take_qty"
+            flow["brand"] = brand
+            flow["ready"] = ready
+            flow["charging"] = charging
+            flow["waiting"] = waiting
+            data[key] = flow
+            save_driver_flow(data)
+
+            pending_qty = flow.get("qty")
+            return (
+                f"🚗 PICKUP — {brand_label(brand).upper()}\n\n"
+                f"📦 Gotowe: {ready}\n"
+                f"🔌 Włożone do ładowania: {charging}\n"
+                f"⏳ Oczekujące: {waiting}\n\n"
+                f"🚦 Twój limit: {limit}\n"
+                + (f"🚗 Chcesz zabrać: {pending_qty}\n\nWpisz tę liczbę jeszcze raz albo wpisz inną." if pending_qty else "\nIle baterii zabierasz?")
+            )
+
+
     if flow.get("type") == "pickup_simple":
         if flow["step"] == "take_qty":
             if qty < 1:
@@ -2198,9 +2278,11 @@ def handle_driver_flow(text, user, chat_id):
                 )
 
             inv = load_inventory()
-            ready = int(inv.get("ready", 0))
-            charging = int(inv.get("charging", 0))
-            waiting = int(inv.get("waiting", 0))
+            brand = flow.get("brand", "lima")
+            item = brand_item(inv, brand)
+            ready = int(item.get("ready", 0))
+            charging = int(item.get("charging", 0))
+            waiting = int(item.get("waiting", 0))
 
             if qty > ready:
                 return f"❌ Gotowych jest tylko: {ready}"
@@ -2216,7 +2298,7 @@ def handle_driver_flow(text, user, chat_id):
 
             return (
                 (
-                    "✅ PODSUMOWANIE PICKUP\n\n"
+                    "✅ PODSUMOWANIE PICKUP — {brand_label(brand).upper()}\n\n"
                     f"📦 Gotowe teraz: {ready}\n"
                     f"🔌 W ładowarkach: {charging}\n"
                     f"⏳ Oczekujące: {waiting}\n\n"
@@ -2239,7 +2321,9 @@ def handle_driver_flow(text, user, chat_id):
             qty_take = int(flow.get("qty", 0))
 
             inv = load_inventory()
-            ready = int(inv.get("ready", 0))
+            brand = flow.get("brand", "lima")
+            item = brand_item(inv, brand)
+            ready = int(item.get("ready", 0))
 
             if qty_take > ready:
                 return f"❌ Gotowych jest teraz tylko {ready}. Kliknij ✏️ Edit albo zacznij pickup od nowa."
@@ -2259,6 +2343,7 @@ def handle_driver_flow(text, user, chat_id):
                 "chat_id": chat_id,
                 "start": start_time.isoformat(),
                 "qty": qty_take,
+                "company": brand,
                 "limit_at_start": flow.get("limit_at_start"),
                 "time_limit_hours": trip_time_limit_hours(qty_take),
                 "end": None,
@@ -2266,13 +2351,14 @@ def handle_driver_flow(text, user, chat_id):
             })
             save_db(db)
 
-            inv["ready"] = ready - qty_take
+            item["ready"] = ready - qty_take
+            inv = manual_inventory_total_from_brands(inv)
             save_inventory(inv)
 
             clear_driver_flow(user.id)
 
             return (
-                f"✅ PICKUP ZAPISANY\n\n"
+                f"✅ PICKUP ZAPISANY — {brand_label(brand).upper()}\n\n"
                 f"Kierowca: {get_driver_name(user)}\n"
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty_take}\n"
@@ -2529,18 +2615,15 @@ def handle_driver_flow(text, user, chat_id):
             ready_returned = qty
             used_returned = returned - ready_returned
 
-            moved_before = auto_move_waiting_to_chargers(chat_id)
-
-            free = charger_free_slots()
-            to_charging = min(used_returned, free)
-            to_waiting = used_returned - to_charging
+            brand = flow.get("brand", "lima")
+            to_charging = 0
+            to_waiting = used_returned
             missing = route_qty - returned
 
             flow["ready_returned"] = ready_returned
             flow["used_returned"] = used_returned
             flow["to_charging"] = to_charging
             flow["to_waiting"] = to_waiting
-            flow["auto_moved_before_return"] = moved_before
             flow["missing_to_ready"] = 0
             flow["next_action"] = "finish"
             flow["take_extra"] = 0
@@ -2550,10 +2633,7 @@ def handle_driver_flow(text, user, chat_id):
             save_driver_flow(data)
 
             missing_line = f"\n⚠️ Brakuje do pełnego zwrotu: {missing}\n" if missing > 0 else ""
-            moved_line = (
-                f"🔁 Najpierw automatycznie przełożono z oczekujących do ładowarek: {moved_before}\n"
-                if moved_before > 0 else ""
-            )
+            moved_line = ""
 
             return (
                 (
@@ -2563,8 +2643,7 @@ def handle_driver_flow(text, user, chat_id):
                     f"📦 Gotowe przywiezione: {ready_returned}\n"
                     f"🔋 Do ładowania/oczekujące: {used_returned}\n"
                     f"{moved_line}"
-                    f"🔌 Wolne miejsca w ładowarkach: {free}\n"
-                    f"➡️ Do ładowarek: {to_charging}\n"
+                    f"➡️ Do ładowarek: 0 — ładowanie wpisujesz ręcznie\n"
                     f"➡️ Oczekujące: {to_waiting}\n"
                     f"{missing_line}\n"
                     "3/3 Wybierz opcję:"
@@ -2660,10 +2739,9 @@ def handle_driver_flow(text, user, chat_id):
                 clear_driver_flow(user.id)
                 return "❌ Gotowe nie mogą być większe niż oddane. Zacznij zwrot od nowa."
 
-            moved_before_save = auto_move_waiting_to_chargers(chat_id)
-            free = charger_free_slots()
-            to_charging = min(used_returned, free)
-            to_waiting = used_returned - to_charging
+            brand = trip_company(trip)
+            to_charging = 0
+            to_waiting = used_returned
 
             payment = calc_trip_payment(trip["start"], original_qty, returned)
             end_time = payment["end"]
@@ -2690,20 +2768,20 @@ def handle_driver_flow(text, user, chat_id):
             trip["rate"] = BASE_RATE
             trip["earned"] = 0
             trip["return_auto"] = True
+            trip["company"] = brand
             trip["payment_logic"] = "returned_minus_time_penalty_from_route_qty_v3"
 
             save_db(db)
 
             inv = load_inventory()
-            inv["ready"] = int(inv.get("ready", 0)) + ready_returned
-            inv["charging"] = int(inv.get("charging", 0)) + to_charging
-            inv["waiting"] = int(inv.get("waiting", 0)) + to_waiting
+            item = brand_item(inv, brand)
+            item["ready"] = int(item.get("ready", 0)) + ready_returned
+            item["charging"] = int(item.get("charging", 0)) + to_charging
+            item["waiting"] = int(item.get("waiting", 0)) + to_waiting
+            inv = manual_inventory_total_from_brands(inv)
             save_inventory(inv)
 
-            if to_charging > 0:
-                add_charging_job_from_return(chat_id, to_charging)
-
-            auto_moved_to_charging = auto_move_waiting_to_chargers(chat_id)
+            auto_moved_to_charging = 0
 
             was_late = late_hours > 0
             limit_change_line = driver_limit_change_message(user, was_late)
@@ -2712,20 +2790,16 @@ def handle_driver_flow(text, user, chat_id):
 
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
 
-            moved_total = int(flow.get("auto_moved_before_return", 0)) + moved_before_save + auto_moved_to_charging
-            auto_move_line = (
-                f"Automatycznie z oczekujących do ładowarek: {moved_total}\n"
-                if moved_total > 0 else ""
-            )
+            auto_move_line = ""
 
             return (
-                f"✅ ZWROT ZAPISANY\n\n"
+                f"✅ ZWROT ZAPISANY — {brand_label(brand).upper()}\n\n"
                 f"Kierowca: {get_driver_name(user)}\n"
                 f"Pobrane: {original_qty}\n"
                 f"Oddane razem: {returned}\n"
                 f"Gotowe przywiezione: {ready_returned}\n"
                 f"Zrobione do statystyk: {max(0, returned - ready_returned)}\n"
-                f"Do ładowarek: {to_charging}\n"
+                f"Do ładowarek: 0 — ładowanie ręczne\n"
                 f"Oczekujące: {to_waiting}\n"
                 f"{auto_move_line}"
                 f"Czas: {fmt_hours(hours)}\n"
