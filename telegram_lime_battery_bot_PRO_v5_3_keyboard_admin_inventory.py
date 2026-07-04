@@ -1200,7 +1200,7 @@ def start_manual_fill_flow(user, chat_id):
     return (
         "🔌 UZUPEŁNIANIE ŁADOWAREK\n\n"
         f"⏳ Oczekujące: {waiting}\n"
-        f"🔌 W ładowarkach: {charging}\n"
+        
         f"🟢 Wolne porty: {free}\n\n"
         "Ile baterii wkładasz do ładowarek?"
     )
@@ -2105,6 +2105,12 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    # FINAL_SIMPLE_WAREHOUSE_HOOK_IN_FLOW
+    manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
+    if manual_result is not None:
+        return manual_result
+
+
     # CLEAN_TWO_WAREHOUSE_MANUAL_HOOK_IN_FLOW
     manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
     if manual_result is not None:
@@ -2260,7 +2266,7 @@ def handle_driver_flow(text, user, chat_id):
             return (
                 f"🚗 PICKUP — {brand_label(brand).upper()}\n\n"
                 f"📦 Gotowe: {ready}\n"
-                f"🔌 Włożone do ładowania: {charging}\n"
+                
                 f"⏳ Oczekujące: {waiting}\n\n"
                 f"🚦 Twój limit: {limit}\n"
                 + (f"🚗 Chcesz zabrać: {pending_qty}\n\nWpisz tę liczbę jeszcze raz albo wpisz inną." if pending_qty else "\nIle baterii zabierasz?")
@@ -2306,7 +2312,7 @@ def handle_driver_flow(text, user, chat_id):
                 (
                     f"✅ PODSUMOWANIE PICKUP — {brand_label(brand).upper()}\n\n"
                     f"📦 Gotowe teraz: {ready}\n"
-                    f"🔌 W ładowarkach: {charging}\n"
+                    
                     f"⏳ Oczekujące: {waiting}\n\n"
                     f"🚗 Zabierasz: {qty}\n"
                     f"📦 Gotowe po pobraniu: {ready - qty}\n\n"
@@ -4336,6 +4342,12 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
+    # FINAL_SIMPLE_WAREHOUSE_HOOK
+    manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
+    if manual_result is not None:
+        return manual_result
+
+
     # CLEAN_TWO_WAREHOUSE_MANUAL_HOOK
     manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
     if manual_result is not None:
@@ -5127,6 +5139,290 @@ def manual_inventory_total_from_brands(inv):
     inv["charging"] = sum(int(companies[b].get("charging", 0)) for b in ["lima", "voi"])
     inv["waiting"] = sum(int(companies[b].get("waiting", 0)) for b in ["lima", "voi"])
     return inv
+
+
+
+# ============================
+# FINAL SIMPLE TWO WAREHOUSE MODEL
+# ILOSC = ręcznie
+# GOTOWE = ręcznie
+# W TRASIE = bot
+# OCZEKUJACE = ILOSC - GOTOWE - W TRASIE
+# LADOWARKI / WLOZONE usunięte z logiki.
+# ============================
+
+def company_key(company):
+    c = normalize_text(str(company or "")).strip()
+    if c in ["voi", "v", "blue", "🔵 voi"]:
+        return "voi"
+    return "lima"
+
+
+def company_label(company):
+    return "🔵 VOI" if company_key(company) == "voi" else "🟢 LIMA"
+
+
+def load_company_inventory():
+    inv = load_inventory()
+    companies = inv.setdefault("companies", {})
+    companies.setdefault("lima", {"total": 0, "ready": 0})
+    companies.setdefault("voi", {"total": 0, "ready": 0})
+
+    # kompatybilność: stare pola zostawiamy, ale nie używamy ich do statusu
+    for key in ["lima", "voi"]:
+        companies[key].setdefault("total", 0)
+        companies[key].setdefault("ready", 0)
+    return inv
+
+
+def save_company_inventory(inv):
+    save_inventory(inv)
+
+
+def get_company_inventory(company):
+    inv = load_company_inventory()
+    return inv.setdefault("companies", {}).setdefault(company_key(company), {"total": 0, "ready": 0})
+
+
+def active_in_transit_by_company(company):
+    key = company_key(company)
+    db = load_db()
+    total = 0
+    for trip in db.get("trips", []):
+        if trip.get("end") is None and company_key(trip.get("company", "lima")) == key:
+            total += int(trip.get("qty", 0) or 0)
+    return total
+
+
+def active_trip_details_by_company(company):
+    key = company_key(company)
+    db = load_db()
+    details = {}
+    for trip in db.get("trips", []):
+        if trip.get("end") is None and company_key(trip.get("company", "lima")) == key:
+            raw_name = trip.get("driver", "Nieznany")
+            try:
+                name = display_driver_name(raw_name)
+            except Exception:
+                name = raw_name
+            details[name] = details.get(name, 0) + int(trip.get("qty", 0) or 0)
+    return details
+
+
+def computed_waiting_for_company(company):
+    c = get_company_inventory(company)
+    total = int(c.get("total", 0) or 0)
+    ready = int(c.get("ready", 0) or 0)
+    transit = active_in_transit_by_company(company)
+    return max(0, total - ready - transit)
+
+
+def status_report():
+    lines = ["📊 STATUS", ""]
+
+    for key, label in [("lima", "🟢 LIMA"), ("voi", "🔵 VOI")]:
+        c = get_company_inventory(key)
+        total = int(c.get("total", 0) or 0)
+        ready = int(c.get("ready", 0) or 0)
+        transit = active_in_transit_by_company(key)
+        waiting = max(0, total - ready - transit)
+
+        lines.append(label)
+        lines.append(f"📦 Ilość: {total}")
+        lines.append(f"✅ Gotowe: {ready}")
+        lines.append(f"⏳ Oczekujące: {waiting}")
+        lines.append(f"🚗 W trasie: {transit}")
+
+        details = active_trip_details_by_company(key)
+        if details:
+            lines.append("")
+            lines.append("Kierowcy w trasie:")
+            for name, qty in details.items():
+                lines.append(f"• {name}: {qty} baterii")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def set_company_simple_field(company, field_raw, value):
+    comp = company_key(company)
+    field_norm = normalize_text(field_raw)
+    inv = load_company_inventory()
+    companies = inv.setdefault("companies", {})
+    c = companies.setdefault(comp, {"total": 0, "ready": 0})
+
+    if field_norm == "ilosc":
+        c["total"] = int(value)
+        field_name = "Ilość"
+    elif field_norm == "gotowe":
+        c["ready"] = int(value)
+        field_name = "Gotowe"
+    else:
+        return None
+
+    # stare pola zerujemy, żeby nie mieszały w innych fragmentach kodu
+    c["charging"] = 0
+    c["waiting"] = max(0, int(c.get("total", 0) or 0) - int(c.get("ready", 0) or 0) - active_in_transit_by_company(comp))
+
+    save_company_inventory(inv)
+    return comp, field_name, int(value)
+
+
+def handle_two_warehouse_manual_command(text, user, chat_id):
+    t = normalize_text(text).strip()
+
+    # Dozwolone tylko:
+    # LIMA ILOSC 581 / LIMA GOTOWE 487
+    # VOI ILOSC 160 / VOI GOTOWE 94
+    m = re.match(r"^(lima|lim|voi|v)\s+(ilosc|ilość|gotowe)\s+(\d+)", t)
+    if m:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        result = set_company_simple_field(m.group(1), m.group(2), m.group(3))
+        if not result:
+            return "Nie rozumiem komendy."
+
+        comp, field_name, value = result
+        try:
+            clear_driver_flow(user.id)
+        except Exception:
+            pass
+
+        return (
+            f"✅ {company_label(comp)} — zapisano\n\n"
+            f"{field_name}: {value}\n\n"
+            f"{status_report()}"
+        )
+
+    # Blokujemy ladowarki/wlozone/oczekujace, bo oczekujące liczy bot.
+    m_block = re.match(r"^(lima|lim|voi|v)\s+(ladowarki|ładowarki|wlozone|włożone|wlozono|włożono|oczekujace|oczekujące)\s+(\d+)", t)
+    if m_block:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return (
+            "⚠️ Tych pól już nie wpisujemy ręcznie.\n\n"
+            "Używaj tylko:\n"
+            "LIMA ILOSC 581\n"
+            "LIMA GOTOWE 487\n"
+            "VOI ILOSC 160\n"
+            "VOI GOTOWE 94\n\n"
+            "Oczekujące bot liczy sam:\n"
+            "OCZEKUJĄCE = ILOŚĆ - GOTOWE - W TRASIE"
+        )
+
+    if re.match(r"^(gotowe|ladowarki|ładowarki|wlozone|włożone|oczekujace|oczekujące|ilosc|ilość)\s+\d+", t):
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return (
+            "⚠️ Podaj firmę i używaj tylko ILOSC albo GOTOWE.\n\n"
+            "Przykłady:\n"
+            "LIMA ILOSC 581\n"
+            "LIMA GOTOWE 487\n"
+            "VOI ILOSC 160\n"
+            "VOI GOTOWE 94"
+        )
+
+    return None
+
+
+def completed_tasks_count_by_company(start_dt, end_dt, company):
+    key = company_key(company)
+    db = load_db()
+    count = 0
+    batteries = 0
+    drivers = {}
+
+    for trip in db.get("trips", []):
+        if company_key(trip.get("company", "lima")) != key:
+            continue
+
+        end_iso = trip.get("end")
+        if not end_iso:
+            continue
+
+        try:
+            end = datetime.fromisoformat(end_iso)
+        except Exception:
+            continue
+
+        if not (start_dt <= end <= end_dt):
+            continue
+
+        count += 1
+        try:
+            qty = trip_work_qty(trip)
+        except Exception:
+            qty = int(trip.get("returned", trip.get("qty", 0)) or 0)
+
+        batteries += qty
+
+        raw_name = trip.get("driver", "Nieznany")
+        try:
+            name = display_driver_name(raw_name)
+        except Exception:
+            name = raw_name
+
+        item = drivers.setdefault(name, {"tasks": 0, "batteries": 0})
+        item["tasks"] += 1
+        item["batteries"] += qty
+
+    return {"tasks": count, "batteries": batteries, "drivers": drivers}
+
+
+def tasks_report_text():
+    day_start, day_end = day_bounds_for_tasks()
+    week_start, week_end = week_bounds_for_tasks()
+
+    lines = ["📊 LICZNIK WYKONANYCH ZADAŃ", "", f"📅 Dzisiaj: {day_start.strftime('%d/%m')}", ""]
+
+    for key, label in [("lima", "🟢 LIMA"), ("voi", "🔵 VOI")]:
+        daily = completed_tasks_count_by_company(day_start, day_end, key)
+        weekly = completed_tasks_count_by_company(week_start, week_end, key)
+
+        lines.append(label)
+        lines.append(f"Dzisiaj: {daily['tasks']} zadań / {daily['batteries']} baterii")
+        lines.append(f"Tydzień: {weekly['tasks']} zadań / {weekly['batteries']} baterii")
+
+        if weekly["drivers"]:
+            lines.append("")
+            lines.append("Kierowcy w tym tygodniu:")
+            for name, item in sorted(weekly["drivers"].items(), key=lambda x: x[1]["tasks"], reverse=True):
+                lines.append(f"• {name}: {item['tasks']} zadań / {item['batteries']} baterii")
+
+        lines.append("")
+
+    lines.append(f"Okres tygodnia: {week_start.strftime('%d/%m %H:%M')} – {week_end.strftime('%d/%m %H:%M')}")
+    return "\n".join(lines).rstrip()
+
+
+# Bridge for old pickup code that uses brand_item(inv, brand)
+def brand_item(inv, brand):
+    comp = company_key(brand)
+    companies = inv.setdefault("companies", {})
+    item = companies.setdefault(comp, {"total": 0, "ready": 0})
+    item.setdefault("total", 0)
+    item.setdefault("ready", 0)
+    item["charging"] = 0
+    item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
+    return item
+
+
+def manual_inventory_total_from_brands(inv):
+    companies = inv.setdefault("companies", {})
+    for comp in ["lima", "voi"]:
+        item = companies.setdefault(comp, {"total": 0, "ready": 0})
+        item.setdefault("total", 0)
+        item.setdefault("ready", 0)
+        item["charging"] = 0
+        item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
+
+    inv["depot_total"] = sum(int(companies[b].get("total", 0)) for b in ["lima", "voi"])
+    inv["ready"] = sum(int(companies[b].get("ready", 0)) for b in ["lima", "voi"])
+    inv["charging"] = 0
+    inv["waiting"] = sum(int(companies[b].get("waiting", 0)) for b in ["lima", "voi"])
+    return inv
+
 
 
 def main():
