@@ -2641,10 +2641,10 @@ def handle_driver_flow(text, user, chat_id):
                     f"Pobrane na trasę: {route_qty}\n"
                     f"Oddane razem: {returned}\n"
                     f"📦 Gotowe przywiezione: {ready_returned}\n"
-                    f"🔋 Do ładowania/oczekujące: {used_returned}\n"
-                    f"{moved_line}"
-                    f"➡️ Do ładowarek: 0 — ładowanie wpisujesz ręcznie\n"
-                    f"➡️ Oczekujące: {to_waiting}\n"
+                    f"🔋 Rozładowane/oczekujące: {used_returned}\n"
+                    
+                    f"➡️ Do ładowania: wpisujesz ręcznie osobną komendą\n"
+                    f"➡️ Oczekujące: {used_returned}\n"
                     f"{missing_line}\n"
                     "3/3 Wybierz opcję:"
                 ),
@@ -2799,9 +2799,9 @@ def handle_driver_flow(text, user, chat_id):
                 f"Oddane razem: {returned}\n"
                 f"Gotowe przywiezione: {ready_returned}\n"
                 f"Zrobione do statystyk: {max(0, returned - ready_returned)}\n"
-                f"Do ładowarek: 0 — ładowanie ręczne\n"
-                f"Oczekujące: {to_waiting}\n"
-                f"{auto_move_line}"
+                f"Do ładowania: wpisujesz ręcznie — ładowanie ręczne\n"
+                f"Oczekujące/rozładowane: {used_returned}\n"
+                
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
                 f"{limit_change_line}\n"
@@ -4170,7 +4170,7 @@ def handle_command(text, user, chat_id):
             f"✅ Zmieniono liczbę portów ładowania\n\n"
             f"Nowy limit: {value}\n"
             f"Wolne miejsca: {free}"
-            f"{moved_line}"
+            
         )
 
     if t in ["/movecharging", "movecharging", "przeniesladowarki", "przenieśładowarki", "przenies_ladowarki"]:
@@ -4281,7 +4281,7 @@ def handle_command(text, user, chat_id):
 
     # HARD GUARD ENTERPRISE:
     # Jeżeli użytkownik jest na ekranie potwierdzenia, KAŻDA wiadomość idzie do flow.
-    # Dzięki temu tekst typu "Do ładowarek: 0" blokuje OK i trafia do audit logu,
+    # Dzięki temu tekst typu "Do ładowania: wpisujesz ręcznie" blokuje OK i trafia do audit logu,
     # zamiast zostać zignorowanym przez menu/komendy.
     active_flow = load_driver_flow().get(user_id)
     if (
