@@ -2105,6 +2105,56 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    # STRICT_TWO_WAREHOUSE_COMMANDS_IN_FLOW
+    m2 = re.match(r"^(lima|lim|voi|v)\s+(ilosc|ilość|gotowe|ladowarki|ładowarki|wlozone|włożone|wlozono|włożono|oczekujace|oczekujące)\s+(\d+)", t)
+    if m2:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        comp_raw = m2.group(1)
+        field_raw = m2.group(2)
+        value = int(m2.group(3))
+
+        comp = "voi" if comp_raw in ["voi", "v"] else "lima"
+        field_norm = normalize_text(field_raw)
+
+        if field_norm == "ilosc":
+            field = "total"
+            field_name = "Ilość"
+        elif field_norm == "gotowe":
+            field = "ready"
+            field_name = "Gotowe"
+        elif field_norm in ["ladowarki", "wlozone", "wlozono"]:
+            field = "charging"
+            field_name = "Włożone do ładowania"
+        else:
+            field = "waiting"
+            field_name = "Oczekujące"
+
+        inv = load_company_inventory()
+        companies = inv.setdefault("companies", {})
+        companies.setdefault("lima", {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        companies.setdefault("voi", {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        companies[comp][field] = value
+        save_inventory(inv)
+
+        clear_driver_flow(user.id)
+
+        return (
+            f"✅ {company_label(comp)} — zapisano\n\n"
+            f"{field_name}: {value}\n\n"
+            f"{status_report()}"
+        )
+
+    if re.match(r"^(gotowe|ladowarki|ładowarki|wlozone|włożone|oczekujace|oczekujące|ilosc|ilość)\s+\d+", t):
+        if is_admin(user):
+            clear_driver_flow(user.id)
+            return (
+                "⚠️ Podaj firmę, żeby nie pomieszać magazynów.\n\n"
+                "Przykład: LIMA GOTOWE 487 albo VOI GOTOWE 127"
+            )
+
+
     # MANUAL BRAND INVENTORY COMMANDS IN FLOW
     brand_reply = set_brand_inventory_command(text)
     if brand_reply:
@@ -4233,6 +4283,67 @@ def tasks_report_text():
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
+    # STRICT_TWO_WAREHOUSE_COMMANDS
+    # Te komendy muszą działać przed starymi handlerami gotowe/ladowarki/oczekujace.
+    m2 = re.match(r"^(lima|lim|voi|v)\s+(ilosc|ilość|gotowe|ladowarki|ładowarki|wlozone|włożone|wlozono|włożono|oczekujace|oczekujące)\s+(\d+)", t)
+    if m2:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        comp_raw = m2.group(1)
+        field_raw = m2.group(2)
+        value = int(m2.group(3))
+
+        comp = "voi" if comp_raw in ["voi", "v"] else "lima"
+        field_norm = normalize_text(field_raw)
+
+        if field_norm == "ilosc":
+            field = "total"
+            field_name = "Ilość"
+        elif field_norm == "gotowe":
+            field = "ready"
+            field_name = "Gotowe"
+        elif field_norm in ["ladowarki", "wlozone", "wlozono"]:
+            field = "charging"
+            field_name = "Włożone do ładowania"
+        else:
+            field = "waiting"
+            field_name = "Oczekujące"
+
+        inv = load_company_inventory()
+        companies = inv.setdefault("companies", {})
+        companies.setdefault("lima", {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        companies.setdefault("voi", {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        companies[comp][field] = value
+        save_inventory(inv)
+
+        clear_driver_flow(user.id)
+
+        return (
+            f"✅ {company_label(comp)} — zapisano\n\n"
+            f"{field_name}: {value}\n\n"
+            f"{status_report()}"
+        )
+
+    # Stare komendy bez firmy blokujemy, żeby nie mieszały magazynów.
+    if re.match(r"^(gotowe|ladowarki|ładowarki|wlozone|włożone|oczekujace|oczekujące|ilosc|ilość)\s+\d+", t):
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+
+        return (
+            "⚠️ Podaj firmę, żeby nie pomieszać magazynów.\n\n"
+            "Przykłady:\n"
+            "LIMA GOTOWE 487\n"
+            "LIMA LADOWARKI 94\n"
+            "LIMA OCZEKUJACE 0\n"
+            "LIMA ILOSC 581\n\n"
+            "VOI GOTOWE 127\n"
+            "VOI LADOWARKI 33\n"
+            "VOI OCZEKUJACE 0\n"
+            "VOI ILOSC 160"
+        )
+
+
     # TWO_WAREHOUSE_MANUAL_COMMANDS
     # Komendy:
     # lima ilosc 581 / lima gotowe 100 / lima wlozone 50 / lima oczekujace 20
@@ -5028,6 +5139,39 @@ async def post_init(app: Application):
     asyncio.create_task(charging_scheduler(app))
     asyncio.create_task(driver_alerts(app))
     asyncio.create_task(weekly_report_scheduler(app))
+
+
+# FINAL_TWO_WAREHOUSE_STATUS_OVERRIDE
+
+def status_report():
+    inv = load_company_inventory()
+    lines = ["📊 STATUS", ""]
+
+    for key, label in [("lima", "🟢 LIMA"), ("voi", "🔵 VOI")]:
+        c = inv.setdefault("companies", {}).setdefault(key, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        total = int(c.get("total", 0) or 0)
+        ready = int(c.get("ready", 0) or 0)
+        charging = int(c.get("charging", 0) or 0)
+        waiting = int(c.get("waiting", 0) or 0)
+        transit = active_in_transit_by_company(key)
+
+        lines.append(label)
+        lines.append(f"📦 Ilość: {total}")
+        lines.append(f"✅ Gotowe: {ready}")
+        lines.append(f"🔋 Włożone do ładowania: {charging}")
+        lines.append(f"⏳ Oczekujące: {waiting}")
+        lines.append(f"🚗 W trasie: {transit}")
+
+        details = active_trip_details_by_company(key)
+        if details:
+            lines.append("")
+            lines.append("Kierowcy w trasie:")
+            for name, qty in details.items():
+                lines.append(f"• {name}: {qty} baterii")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
 
 
 def main():
