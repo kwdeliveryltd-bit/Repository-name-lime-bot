@@ -2655,7 +2655,7 @@ def handle_driver_flow(text, user, chat_id):
                     f"📦 Gotowe przywiezione: {ready_returned}\n"
                     f"🔋 Rozładowane/oczekujące: {used_returned}\n"
                     
-                    f"➡️ Do ładowania: wpisujesz ręcznie osobną komendą\n"
+                    f"➡️ Rozładowane: wpisujesz ręcznie osobną komendą\n"
                     f"➡️ Oczekujące: {used_returned}\n"
                     f"{missing_line}\n"
                     "3/3 Wybierz opcję:"
@@ -2811,8 +2811,8 @@ def handle_driver_flow(text, user, chat_id):
                 f"Oddane razem: {returned}\n"
                 f"Gotowe przywiezione: {ready_returned}\n"
                 f"Zrobione do statystyk: {max(0, returned - ready_returned)}\n"
-                f"Do ładowania: wpisujesz ręcznie — ładowanie ręczne\n"
-                f"Oczekujące/rozładowane: {used_returned}\n"
+                f"Rozładowane zapisane\n"
+                f"Rozładowane: {used_returned}\n"
                 
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
@@ -4552,7 +4552,7 @@ def handle_command(text, user, chat_id):
 
     # HARD GUARD ENTERPRISE:
     # Jeżeli użytkownik jest na ekranie potwierdzenia, KAŻDA wiadomość idzie do flow.
-    # Dzięki temu tekst typu "Do ładowania: wpisujesz ręcznie" blokuje OK i trafia do audit logu,
+    # Dzięki temu tekst typu "Rozładowane: wpisujesz ręcznie" blokuje OK i trafia do audit logu,
     # zamiast zostać zignorowanym przez menu/komendy.
     active_flow = load_driver_flow().get(user_id)
     if (
