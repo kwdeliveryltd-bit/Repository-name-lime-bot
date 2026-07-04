@@ -289,13 +289,27 @@ def driver_limit_change_message(user, was_late):
 
 
 def load_inventory():
-    return load_json(INVENTORY_FILE, {
-        "depot_total": 505,
+    inv = load_json(INVENTORY_FILE, {
+        "depot_total": 0,
         "ready": 0,
         "waiting": 0,
         "charging": 0,
+        "brands": {
+            "lima": {"total": 0, "ready": 0, "charging": 0, "waiting": 0},
+            "voi": {"total": 0, "ready": 0, "charging": 0, "waiting": 0}
+        },
         "updated_at": None
     })
+
+    brands = inv.setdefault("brands", {})
+    for brand in ["lima", "voi"]:
+        item = brands.setdefault(brand, {})
+        item.setdefault("total", 0)
+        item.setdefault("ready", 0)
+        item.setdefault("charging", 0)
+        item.setdefault("waiting", 0)
+
+    return inv
 
 
 def save_inventory(inv):
@@ -304,11 +318,15 @@ def save_inventory(inv):
 
 
 def load_jobs():
-    return load_json(CHARGE_JOBS_FILE, {"jobs": []})
+    # Ładowanie jest obsługiwane ręcznie przez człowieka.
+    # Timery i partie ładowania są wyłączone.
+    return {"jobs": []}
 
 
 def save_jobs(data):
-    save_json(CHARGE_JOBS_FILE, data)
+    # Ładowanie jest obsługiwane ręcznie.
+    # Nie zapisujemy timerów ładowania.
+    return None
 
 
 def load_group():
@@ -1231,6 +1249,149 @@ def trip_work_qty(trip):
         return int(trip.get("returned", 0) or 0)
 
 
+
+def manual_inventory_total_from_brands(inv):
+    brands = inv.setdefault("brands", {})
+    for brand in ["lima", "voi"]:
+        item = brands.setdefault(brand, {})
+        item.setdefault("total", 0)
+        item.setdefault("ready", 0)
+        item.setdefault("charging", 0)
+        item.setdefault("waiting", 0)
+
+    inv["depot_total"] = sum(int(brands[b].get("total", 0)) for b in ["lima", "voi"])
+    inv["ready"] = sum(int(brands[b].get("ready", 0)) for b in ["lima", "voi"])
+    inv["charging"] = sum(int(brands[b].get("charging", 0)) for b in ["lima", "voi"])
+    inv["waiting"] = sum(int(brands[b].get("waiting", 0)) for b in ["lima", "voi"])
+    return inv
+
+
+def brand_label(brand):
+    return "Lima" if brand == "lima" else "Voi"
+
+
+def brand_inventory_text(inv=None):
+    if inv is None:
+        inv = load_inventory()
+    brands = inv.get("brands", {})
+
+    lines = ["", "🏷️ STANY RĘCZNE"]
+    for brand in ["lima", "voi"]:
+        item = brands.get(brand, {})
+        lines.append(
+            f"{brand_label(brand)} — "
+            f"ilość: {int(item.get('total', 0))}, "
+            f"gotowe: {int(item.get('ready', 0))}, "
+            f"włożone: {int(item.get('charging', 0))}, "
+            f"oczekujące: {int(item.get('waiting', 0))}"
+        )
+    return "\n".join(lines)
+
+
+def set_brand_inventory_command(text):
+    """
+    Ręczne stany:
+    lima ilosc 600
+    lima gotowe 44
+    lima wlozone 138
+    lima oczekujace 159
+
+    voi ilosc 200
+    voi gotowe 10
+    voi wlozone 80
+    voi oczekujace 30
+
+    Działa też:
+    lima baterie wlozone 138
+    voi baterie gotowe 20
+    """
+    t = normalize_text(text).strip()
+    parts = t.split()
+    if not parts:
+        return None
+
+    brand = None
+    if parts[0] in ["lima", "lim", "lime"]:
+        brand = "lima"
+    elif parts[0] in ["voi", "woi", "voy"]:
+        brand = "voi"
+
+    if not brand:
+        return None
+
+    qty = number_from_text(text)
+    if qty is None:
+        return (
+            "Podaj liczbę, np.:\n"
+            "lima ilosc 600\n"
+            "lima gotowe 44\n"
+            "lima wlozone 138\n"
+            "lima oczekujace 159"
+        )
+
+    if qty < 0:
+        return "Liczba nie może być ujemna."
+
+    if any(word in t for word in ["ilosc", "ilość", "total", "depo", "magazyn"]):
+        field = "total"
+        label = "ilość na magazynie"
+    elif any(word in t for word in ["gotowe", "gotowych"]):
+        field = "ready"
+        label = "gotowe"
+    elif any(word in t for word in ["wlozone", "włożone", "ladowarki", "ładowarki", "ladowaniu", "ładowaniu"]):
+        field = "charging"
+        label = "włożone do ładowania"
+    elif any(word in t for word in ["oczekuje", "oczekuja", "oczekujące", "oczekujace", "oczekujacych", "oczekujących"]):
+        field = "waiting"
+        label = "oczekujące"
+    else:
+        return (
+            "Nie wiem, który stan zmienić.\n\n"
+            "Użyj:\n"
+            "lima ilosc 600\n"
+            "lima gotowe 44\n"
+            "lima wlozone 138\n"
+            "lima oczekujace 159\n\n"
+            "albo tak samo dla voi."
+        )
+
+    inv = load_inventory()
+    brands = inv.setdefault("brands", {})
+    item = brands.setdefault(brand, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+    item[field] = int(qty)
+
+    inv = manual_inventory_total_from_brands(inv)
+    save_inventory(inv)
+
+    return (
+        f"✅ ZAPISANO STAN RĘCZNY\n\n"
+        f"Firma: {brand_label(brand)}\n"
+        f"{label}: {qty}\n\n"
+        f"📦 Gotowe razem: {int(inv.get('ready', 0))}\n"
+        f"⏳ Oczekujące razem: {int(inv.get('waiting', 0))}\n"
+        f"🔌 Włożone razem: {int(inv.get('charging', 0))}\n"
+        f"🏢 Ilość razem: {int(inv.get('depot_total', 0))}\n"
+        f"{brand_inventory_text(inv)}"
+    )
+
+
+def disabled_charging_module_message():
+    return (
+        "Ta funkcja została wyłączona.\n\n"
+        "Ładowanie jest teraz prowadzone ręcznie przez człowieka.\n"
+        "Użyj komend:\n"
+        "lima ilosc 600\n"
+        "lima gotowe 44\n"
+        "lima wlozone 138\n"
+        "lima oczekujace 159\n\n"
+        "voi ilosc 200\n"
+        "voi gotowe 20\n"
+        "voi wlozone 80\n"
+        "voi oczekujace 30"
+    )
+
+
+
 def status_report():
     inv = load_inventory()
     depot = int(inv.get("depot_total", 0))
@@ -1248,9 +1409,11 @@ def status_report():
         "",
         f"📦 Gotowe: {ready}",
         f"⏳ Oczekujące: {waiting}",
-        f"🔌 W ładowarkach: {charging}",
+        f"🔌 Włożone do ładowania: {charging}",
         f"🚗 W trasie: {transit}",
     ]
+
+    lines.append(brand_inventory_text(inv))
 
     transit_details = active_trip_details()
     if transit_details:
@@ -1826,57 +1989,18 @@ def get_charger_slots():
 
 
 def charger_free_slots():
-    inv = load_inventory()
-    charging = int(inv.get("charging", 0))
-    return max(0, get_charger_slots() - charging)
+    # Porty ładowarek są wyłączone. Stan "włożone" jest wpisywany ręcznie.
+    return 0
 
 
 def auto_move_waiting_to_chargers(chat_id):
-    """
-    Automatycznie przenosi baterie z OCZEKUJĄCYCH do wolnych miejsc w ŁADOWARKACH.
-    Nie zmienia sumy depo — tylko przesuwa: waiting -> charging i zakłada nowy timer ładowania.
-    """
-    inv = load_inventory()
-    waiting = int(inv.get("waiting", 0))
-    charging = int(inv.get("charging", 0))
-    free = max(0, get_charger_slots() - charging)
-
-    move_qty = min(waiting, free)
-    if move_qty <= 0:
-        return 0
-
-    inv["waiting"] = waiting - move_qty
-    inv["charging"] = charging + move_qty
-    save_inventory(inv)
-
-    add_charging_job_from_return(chat_id, move_qty)
-    return move_qty
+    # Automatyczne przenoszenie oczekujące -> włożone jest wyłączone.
+    return 0
 
 
 def add_charging_job_from_return(chat_id, qty):
-    qty = int(qty)
-    if qty <= 0:
-        return
-
-    start = now()
-    ready_at = start + timedelta(hours=CHARGE_TIME_HOURS)
-    alarm_at = ready_at - timedelta(minutes=ALARM_BEFORE_MINUTES)
-
-    jobs_data = load_jobs()
-    jobs = jobs_data.setdefault("jobs", [])
-    jobs.append({
-        "id": len(jobs) + 1,
-        "qty": qty,
-        "chat_id": chat_id,
-        "start_at": start.isoformat(),
-        "ready_at": ready_at.isoformat(),
-        "alarm_at": alarm_at.isoformat(),
-        "alarm_sent": False,
-        "ready_sent": False,
-        "status": "charging",
-        "source": "return"
-    })
-    save_jobs(jobs_data)
+    # Timery ładowania są wyłączone.
+    return None
 
 
 def start_return_flow(user, chat_id, returned_qty=None):
@@ -1943,6 +2067,19 @@ def handle_driver_flow(text, user, chat_id):
         return None
 
     t = normalize_text(text).strip()
+
+    # MANUAL BRAND INVENTORY COMMANDS IN FLOW
+    brand_reply = set_brand_inventory_command(text)
+    if brand_reply:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        clear_driver_flow(user.id)
+        return brand_reply
+
+    if t in ["f", "/f", "fill", "/fill", "g", "/g"]:
+        clear_driver_flow(user.id)
+        return disabled_charging_module_message()
+
 
     if t in ["f", "/f", "fill", "/fill"]:
         if not is_admin(user):
@@ -3871,6 +4008,26 @@ def resolve_driver_for_admin(query):
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
+
+    # MANUAL BRAND INVENTORY COMMANDS — Lima/Voi
+    brand_reply = set_brand_inventory_command(text)
+    if brand_reply:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return brand_reply
+
+    # Wyłączony moduł automatycznych ładowarek/portów/timerów/F/G.
+    if (
+        t in ["f", "/f", "fill", "/fill", "g", "/g", "chargers", "/chargers", "ladowarki", "ładowarki"]
+        or t.startswith("setchargers")
+        or t.startswith("/setchargers")
+        or t.startswith("movecharging")
+        or t.startswith("/movecharging")
+        or t.startswith("przenies")
+        or t.startswith("przenieś")
+    ):
+        return disabled_charging_module_message()
+
 
     # SAFE F COMMAND
     if t in ["f", "/f", "fill", "/fill"]:
