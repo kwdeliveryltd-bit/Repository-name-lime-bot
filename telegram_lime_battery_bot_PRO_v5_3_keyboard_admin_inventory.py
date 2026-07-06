@@ -20,6 +20,8 @@ CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
 GROUP_FILE = "telegram_group.json"
 DRIVER_CHECK_FILE = "telegram_driver_checks.json"
 DRIVER_FLOW_FILE = "telegram_driver_flow.json"
+VAN_CHARGING_FILE = "telegram_van_charging.json"
+VAN_KWH_RATE = 0.35
 WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
 DRIVERS_FILE = "telegram_drivers.json"
 AUDIT_FILE = "telegram_audit_log.json"
@@ -2104,6 +2106,25 @@ def handle_driver_flow(text, user, chat_id):
         return None
 
     t = normalize_text(text).strip()
+
+    # VAN_CHARGING_FLOW
+    if flow.get("type") == "van_charging":
+        if flow.get("step") == "kwh":
+            kwh = parse_kwh_value(text)
+            if kwh is None or kwh <= 0:
+                return "Podaj poprawną liczbę kWh, np. 12.457"
+
+            entry = save_van_kwh_entry(user, chat_id, kwh)
+            clear_driver_flow(user.id)
+
+            return (
+                "✅ ŁADOWANIE VAN ZAPISANE\n\n"
+                f"Kierowca: {entry['driver']}\n"
+                f"⚡ Energia: {entry['kwh']:.3f} kWh\n"
+                f"💷 Stawka: £{entry['rate']:.2f} / kWh\n"
+                f"💰 Do zapłaty: £{entry['cost']:.2f}"
+            )
+
 
     # FINAL_SIMPLE_WAREHOUSE_HOOK_IN_FLOW
     manual_result = handle_two_warehouse_manual_command(text, user, chat_id)
@@ -4339,8 +4360,171 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
     return None
 
 
+
+# ============================
+# VAN ENERGY CHARGING MODULE
+# Osobny moduł, niezależny od magazynów LIMA/VOI.
+# ============================
+
+def load_van_charging():
+    return load_json(VAN_CHARGING_FILE, {"entries": [], "last_auto_report_week": None})
+
+
+def save_van_charging(data):
+    save_json(VAN_CHARGING_FILE, data)
+
+
+def parse_kwh_value(text):
+    # Obsługuje: 12.457, 12,457, "12.457 kwh"
+    m = re.search(r"(\d+(?:[.,]\d+)?)", str(text or ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def start_van_flow(user, chat_id):
+    data = load_driver_flow()
+    data[str(user.id)] = {
+        "type": "van_charging",
+        "chat_id": chat_id,
+        "step": "kwh",
+        "driver": get_driver_name(user),
+        "created_at": now().isoformat(),
+    }
+    save_driver_flow(data)
+
+    return (
+        "🚐 VAN — ŁADOWANIE ENERGII\n\n"
+        "Podaj ilość kWh z licznika, np.:\n"
+        "12.457"
+    )
+
+
+def save_van_kwh_entry(user, chat_id, kwh):
+    kwh = float(kwh)
+    cost = round(kwh * VAN_KWH_RATE, 2)
+
+    data = load_van_charging()
+    entries = data.setdefault("entries", [])
+    entry = {
+        "driver": get_driver_name(user),
+        "user_id": str(user.id),
+        "chat_id": chat_id,
+        "kwh": kwh,
+        "rate": VAN_KWH_RATE,
+        "cost": cost,
+        "created_at": now().isoformat(),
+    }
+    entries.append(entry)
+    save_van_charging(data)
+    return entry
+
+
+def van_week_bounds(reference=None):
+    current = reference or now()
+    monday = (current - timedelta(days=current.weekday())).replace(hour=0, minute=1, second=0, microsecond=0)
+    sunday_end = monday + timedelta(days=6, hours=23, minutes=58)
+    return monday, sunday_end
+
+
+def van_report_text(reference=None):
+    week_start, week_end = van_week_bounds(reference)
+    data = load_van_charging()
+
+    totals = {}
+    total_kwh = 0.0
+    total_cost = 0.0
+
+    for entry in data.get("entries", []):
+        try:
+            created = datetime.fromisoformat(entry.get("created_at"))
+        except Exception:
+            continue
+
+        if not (week_start <= created <= week_end):
+            continue
+
+        driver = entry.get("driver", "Nieznany")
+        try:
+            driver = display_driver_name(driver)
+        except Exception:
+            pass
+
+        kwh = float(entry.get("kwh", 0) or 0)
+        cost = float(entry.get("cost", round(kwh * VAN_KWH_RATE, 2)) or 0)
+
+        item = totals.setdefault(driver, {"kwh": 0.0, "cost": 0.0, "count": 0})
+        item["kwh"] += kwh
+        item["cost"] += cost
+        item["count"] += 1
+
+        total_kwh += kwh
+        total_cost += cost
+
+    lines = [
+        "🔌 RAPORT VAN",
+        "",
+        f"Okres: {week_start.strftime('%d/%m %H:%M')} – {week_end.strftime('%d/%m %H:%M')}",
+        f"Stawka: £{VAN_KWH_RATE:.2f} / kWh",
+        "",
+    ]
+
+    if not totals:
+        lines.append("Brak wpisów VAN w tym tygodniu.")
+        return "\n".join(lines)
+
+    for driver, item in sorted(totals.items(), key=lambda x: x[0].lower()):
+        lines.append(f"{driver}")
+        lines.append(f"• Wpisy: {item['count']}")
+        lines.append(f"• Energia: {item['kwh']:.3f} kWh")
+        lines.append(f"• Do zapłaty: £{item['cost']:.2f}")
+        lines.append("")
+
+    lines.append("RAZEM")
+    lines.append(f"⚡ Energia: {total_kwh:.3f} kWh")
+    lines.append(f"💰 Do zapłaty: £{total_cost:.2f}")
+
+    return "\n".join(lines).rstrip()
+
+
+def maybe_send_weekly_van_report(application=None):
+    """
+    Wywołuj z istniejącej pętli/schedulera, jeśli jest.
+    Wysyła raport w poniedziałek o 06:00 tylko raz na tydzień.
+    """
+    current = now()
+    if current.weekday() != 0 or current.hour != 6:
+        return None
+
+    week_start, week_end = van_week_bounds(current - timedelta(days=1))
+    week_key = week_start.strftime("%Y-%m-%d")
+
+    data = load_van_charging()
+    if data.get("last_auto_report_week") == week_key:
+        return None
+
+    data["last_auto_report_week"] = week_key
+    save_van_charging(data)
+
+    return van_report_text(current - timedelta(days=1))
+
+
+
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
+
+    # VAN_CHARGING_COMMANDS
+    if t in ["van", "/van"]:
+        return start_van_flow(user, chat_id)
+
+    if t in ["raport van", "/raportvan", "van raport", "report van"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return van_report_text()
+
 
     # ADMIN_RESET_COMPANY_WAREHOUSE
     if t in ["reset lima", "lima reset"]:
