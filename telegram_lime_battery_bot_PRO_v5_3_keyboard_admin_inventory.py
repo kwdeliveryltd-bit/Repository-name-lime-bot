@@ -3,7 +3,9 @@ import json
 import math
 import os
 import re
+import shutil
 import threading
+import zipfile
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,18 +16,87 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Brak TELEGRAM_TOKEN w Railway Variables")
-DB_FILE = "telegram_db.json"
-INVENTORY_FILE = "telegram_inventory.json"
-CHARGE_JOBS_FILE = "telegram_charge_jobs.json"
-GROUP_FILE = "telegram_group.json"
-DRIVER_CHECK_FILE = "telegram_driver_checks.json"
-DRIVER_FLOW_FILE = "telegram_driver_flow.json"
-VAN_CHARGING_FILE = "telegram_van_charging.json"
+
+# ============================
+# TRWAŁA PAMIĘĆ BOTA
+# ============================
+# Na Railway podłącz Volume i ustaw Mount Path, np. /app/data.
+# Railway automatycznie przekazuje wtedy RAILWAY_VOLUME_MOUNT_PATH.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = (
+    os.getenv("BOT_DATA_DIR")
+    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    or os.path.join(APP_DIR, "data")
+)
+os.makedirs(DATA_DIR, exist_ok=True)
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def data_path(filename):
+    return os.path.join(DATA_DIR, filename)
+
+
+DATA_FILE_NAMES = [
+    "telegram_db.json",
+    "telegram_inventory.json",
+    "telegram_charge_jobs.json",
+    "telegram_group.json",
+    "telegram_driver_checks.json",
+    "telegram_driver_flow.json",
+    "telegram_van_charging.json",
+    "telegram_weekly_report.json",
+    "telegram_drivers.json",
+    "telegram_audit_log.json",
+    "telegram_driver_limits.json",
+    "telegram_reset_wizard.json",
+    "config.json",
+]
+
+
+def migrate_legacy_data_files():
+    """
+    Przy pierwszym uruchomieniu kopiuje stare pliki JSON do trwałego katalogu.
+    Działa, jeśli stare pliki zostały dołączone do wdrożenia albo ręcznie wgrane.
+    Nigdy nie nadpisuje danych już istniejących w Volume.
+    """
+    legacy_dirs = []
+    for directory in [os.getcwd(), APP_DIR]:
+        directory = os.path.abspath(directory)
+        if directory not in legacy_dirs:
+            legacy_dirs.append(directory)
+
+    for filename in DATA_FILE_NAMES:
+        target = data_path(filename)
+        if os.path.exists(target):
+            continue
+        for directory in legacy_dirs:
+            source = os.path.join(directory, filename)
+            if os.path.abspath(source) == os.path.abspath(target):
+                continue
+            if os.path.isfile(source):
+                try:
+                    shutil.copy2(source, target)
+                    print(f"Migracja pamięci: {source} -> {target}")
+                except Exception as exc:
+                    print(f"Błąd migracji {filename}: {exc}")
+                break
+
+
+migrate_legacy_data_files()
+
+DB_FILE = data_path("telegram_db.json")
+INVENTORY_FILE = data_path("telegram_inventory.json")
+CHARGE_JOBS_FILE = data_path("telegram_charge_jobs.json")
+GROUP_FILE = data_path("telegram_group.json")
+DRIVER_CHECK_FILE = data_path("telegram_driver_checks.json")
+DRIVER_FLOW_FILE = data_path("telegram_driver_flow.json")
+VAN_CHARGING_FILE = data_path("telegram_van_charging.json")
 VAN_KWH_RATE = 0.35
-WEEKLY_REPORT_FILE = "telegram_weekly_report.json"
-DRIVERS_FILE = "telegram_drivers.json"
-AUDIT_FILE = "telegram_audit_log.json"
-DRIVER_LIMITS_FILE = "telegram_driver_limits.json"
+WEEKLY_REPORT_FILE = data_path("telegram_weekly_report.json")
+DRIVERS_FILE = data_path("telegram_drivers.json")
+AUDIT_FILE = data_path("telegram_audit_log.json")
+DRIVER_LIMITS_FILE = data_path("telegram_driver_limits.json")
 
 FILE_LOCK = threading.RLock()
 
@@ -33,6 +104,10 @@ FILE_LOCK = threading.RLock()
 # Przykład: ADMIN_IDS = {"123456789"}
 # UWAGA: pusta lista oznacza BRAK administratorów.
 ADMIN_IDS = {"6030936882"}
+
+# Ograniczone uprawnienia magazynowe (bez pełnych praw administratora).
+# Michał Pietrzak może wpisywać wyłącznie stany: LIMA/VOI ILOSC oraz LIMA/VOI GOTOWE.
+WAREHOUSE_MANAGER_IDS = {"7247279842"}
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -193,6 +268,77 @@ def save_json(path, data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+
+
+def create_data_backup(reason="manual"):
+    """Tworzy ZIP ze wszystkimi plikami pamięci bota."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(reason or "manual"))[:40]
+    timestamp = now().strftime("%Y%m%d-%H%M%S") if "now" in globals() else datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive_path = os.path.join(BACKUP_DIR, f"bot-memory-{timestamp}-{safe_reason}.zip")
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        included = []
+        for filename in DATA_FILE_NAMES:
+            path = data_path(filename)
+            if os.path.isfile(path):
+                archive.write(path, arcname=filename)
+                included.append(filename)
+
+        manifest = {
+            "created_at": datetime.now().astimezone().isoformat(),
+            "reason": reason,
+            "data_dir": DATA_DIR,
+            "files": included,
+        }
+        archive.writestr("backup_manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    # Zachowujemy 60 ostatnich lokalnych kopii.
+    try:
+        backups = sorted(
+            [os.path.join(BACKUP_DIR, name) for name in os.listdir(BACKUP_DIR) if name.endswith(".zip")],
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        for old_path in backups[60:]:
+            os.remove(old_path)
+    except Exception as exc:
+        print("Backup cleanup error:", exc)
+
+    return archive_path
+
+
+def completed_trip_history():
+    """Zwraca zakończone trasy; reset nie może ich usuwać."""
+    try:
+        return [trip for trip in load_db().get("trips", []) if trip.get("end") is not None]
+    except Exception:
+        return []
+
+
+def keep_completed_history_only():
+    history = completed_trip_history()
+    save_db({"trips": history})
+    return len(history)
+
+
+def memory_status_text():
+    db = load_db()
+    trips = db.get("trips", [])
+    completed = sum(1 for trip in trips if trip.get("end") is not None)
+    active = sum(1 for trip in trips if trip.get("end") is None)
+    van_entries = len(load_van_charging().get("entries", [])) if "load_van_charging" in globals() else 0
+    volume_active = bool(os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or os.getenv("BOT_DATA_DIR"))
+    return (
+        "🧠 PAMIĘĆ BOTA\n\n"
+        f"Zakończone trasy w historii: {completed}\n"
+        f"Aktywne trasy: {active}\n"
+        f"Wpisy ładowania VAN: {van_entries}\n"
+        f"Katalog danych: {DATA_DIR}\n"
+        f"Trwały katalog/Volume: {'TAK ✅' if volume_active else 'NIE ⚠️'}\n\n"
+        "Reset magazynu zachowuje zakończone trasy. "
+        "Komenda BACKUP DANYCH pobiera pełną kopię pamięci."
+    )
 
 
 def load_db():
@@ -776,6 +922,14 @@ def is_admin(user):
     # Produkcyjnie wpisz swoje Telegram ID w ADMIN_IDS.
     # Pusta lista ADMIN_IDS oznacza brak administratorów, a nie tryb testowy.
     return bool(user) and str(user.id) in ADMIN_IDS
+
+
+def can_manage_warehouse(user):
+    """Admin albo osoba z ograniczonym prawem do wpisywania stanów magazynowych."""
+    if not user:
+        return False
+    uid = str(user.id)
+    return uid in ADMIN_IDS or uid in WAREHOUSE_MANAGER_IDS
 
 
 def get_keyboard(user=None, chat=None):
@@ -1815,8 +1969,9 @@ def setup_wizard_handle(text, user_id, chat_id):
 
     if action == "setup_trips":
         if t in ["zatwierdz", "zatwierdzam", "gotowe", "koniec"]:
-            # Save everything at once
-            save_db({"trips": []})
+            # Save everything at once, ale zachowaj zakończone trasy do statystyk.
+            create_data_backup("before-setup-wizard-reset")
+            keep_completed_history_only()
             save_jobs({"jobs": []})
             save_driver_checks({})
 
@@ -2000,7 +2155,7 @@ def remove_ready_from_chargers(qty):
 
 
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = data_path("config.json")
 
 
 def load_config():
@@ -2050,18 +2205,31 @@ def start_return_flow(user, chat_id, returned_qty=None):
         return "Brak baterii w aktywnej trasie."
 
     brand = trip_company(trip)
+    battery_types = trip.get("battery_types") or {}
+    route_e4 = int(battery_types.get("E4", trip.get("e4_qty", 0)) or 0)
+    route_e5 = int(battery_types.get("E5", trip.get("e5_qty", 0)) or 0)
+    voi_types_known = brand == "voi" and ("battery_types" in trip or "e4_qty" in trip or "e5_qty" in trip)
+
+    first_step = "returned_e4" if brand == "voi" else "returned_qty"
 
     data = load_driver_flow()
     data[str(user.id)] = {
         "type": "return_auto",
         "chat_id": chat_id,
-        "step": "returned_qty",
+        "step": first_step,
         "driver": get_driver_name(user),
         "created_at": now().isoformat(),
         "route_qty": route_qty,
         "brand": brand,
+        "route_e4": route_e4,
+        "route_e5": route_e5,
+        "voi_types_known": voi_types_known,
+        "returned_e4": None,
+        "returned_e5": None,
         "returned": None,
         "ready_returned": 0,
+        "ready_returned_e4": 0,
+        "ready_returned_e5": 0,
         "used_returned": 0,
         "to_charging": 0,
         "to_waiting": 0,
@@ -2069,6 +2237,18 @@ def start_return_flow(user, chat_id, returned_qty=None):
         "next_action": "finish",
     }
     save_driver_flow(data)
+
+    if brand == "voi":
+        known_line = (
+            f"Na trasie: E4 = {route_e4}, E5 = {route_e5} (razem {route_qty}).\n\n"
+            if voi_types_known else
+            f"Masz w trasie łącznie: {route_qty} baterii.\n\n"
+        )
+        return (
+            "🔁 KONTROLA ZWROTU — VOI\n\n"
+            f"{known_line}"
+            "1/5 Ile baterii E4 oddajesz?"
+        )
 
     return (
         f"🔁 KONTROLA ZWROTU — {brand_label(brand).upper()}\n\n"
@@ -2107,6 +2287,77 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    # MAGAZYN VOI — wpis gotowych E4/E5 po komendzie VOI GOTOWE.
+    if flow.get("type") == "warehouse_voi_ready_types":
+        if not can_manage_warehouse(user):
+            clear_driver_flow(user.id)
+            return "❌ Brak dostępu."
+
+        if is_cancel_text(t):
+            clear_driver_flow(user.id)
+            return "❌ Przerwano uzupełnianie magazynu VOI."
+
+        qty_value = number_from_text(text)
+        if qty_value is None:
+            return "Wpisz liczbę albo wpisz: anuluj"
+        if qty_value < 0:
+            return "Liczba nie może być ujemna."
+
+        if flow.get("step") == "ready_e4":
+            expected_total = flow.get("expected_total")
+            needed_line = ""
+            if expected_total is not None:
+                needed = int(expected_total) - qty_value
+                if needed < 0:
+                    return (
+                        f"❌ E4 ({qty_value}) jest większe niż gotowe razem ({expected_total}).\n"
+                        "Wpisz ponownie liczbę E4 albo wpisz: anuluj"
+                    )
+                needed_line = f"\nAby suma wyniosła {expected_total}, E5 powinno być: {needed}."
+
+            flow["ready_e4"] = qty_value
+            flow["step"] = "ready_e5"
+            data[key] = flow
+            save_driver_flow(data)
+            return (
+                f"✅ Gotowe E4: {qty_value}\n\n"
+                f"2/2 Ile jest GOTOWYCH baterii E5?{needed_line}"
+            )
+
+        if flow.get("step") == "ready_e5":
+            ready_e4 = int(flow.get("ready_e4", 0) or 0)
+            ready_e5 = qty_value
+            total = ready_e4 + ready_e5
+            expected_total = flow.get("expected_total")
+            if expected_total is not None and total != int(expected_total):
+                needed = int(expected_total) - ready_e4
+                return (
+                    "❌ Suma E4 + E5 nie zgadza się z wpisem GOTOWE.\n\n"
+                    f"E4: {ready_e4}\n"
+                    f"E5: {ready_e5}\n"
+                    f"Razem: {total}, miało być: {expected_total}.\n\n"
+                    f"Wpisz ponownie E5: {max(0, needed)}, albo wpisz: anuluj"
+                )
+
+            set_voi_ready_types(ready_e4, ready_e5)
+            audit_log(
+                "warehouse_voi_ready_types_update",
+                user=user,
+                chat_id=chat_id,
+                details={"ready_e4": ready_e4, "ready_e5": ready_e5, "ready": total},
+            )
+            clear_driver_flow(user.id)
+            return (
+                "✅ MAGAZYN VOI UZUPEŁNIONY\n\n"
+                f"E4 gotowe: {ready_e4}\n"
+                f"E5 gotowe: {ready_e5}\n"
+                f"Razem gotowe: {total}\n\n"
+                f"{status_report()}"
+            )
+
+        clear_driver_flow(user.id)
+        return "⚠️ Uzupełnianie VOI się zacięło. Wpisz VOI GOTOWE jeszcze raz."
+
     # VAN_CHARGING_FLOW
     if flow.get("type") == "van_charging":
         if flow.get("step") == "kwh":
@@ -2138,11 +2389,19 @@ def handle_driver_flow(text, user, chat_id):
         return manual_result
 
 
-    # MANUAL BRAND INVENTORY COMMANDS IN FLOW
-    brand_reply = set_brand_inventory_command(text)
-    if brand_reply:
+    # STARE KOMENDY MAGAZYNU W TRAKCIE FLOW — tylko pełny administrator.
+    # Michał Pietrzak ma dostęp wyłącznie do czterech komend obsługiwanych wyżej:
+    # LIMA/VOI ILOSC oraz LIMA/VOI GOTOWE.
+    brand_reply = None
+    legacy_inventory_match = re.match(
+        r"^(lima|lim|lime|voi|woi|voy)\s+(ilosc|ilość|total|depo|magazyn|gotowe|gotowych|wlozone|włożone|ladowarki|ładowarki|oczekuje|oczekuja|oczekujace|oczekujące)\b",
+        t
+    )
+    if legacy_inventory_match:
         if not is_admin(user):
             return "❌ Brak dostępu."
+        brand_reply = set_brand_inventory_command(text)
+    if brand_reply:
         clear_driver_flow(user.id)
         return brand_reply
 
@@ -2235,12 +2494,18 @@ def handle_driver_flow(text, user, chat_id):
     # Kroki tekstowe typu "zatwierdz" nie mogą być blokowane przez brak liczby.
     numeric_steps = {
         ("pickup_simple", "take_qty"),
+        ("pickup_voi_types", "e4_qty"),
+        ("pickup_voi_types", "e5_qty"),
         ("pickup", "ready"),
         ("pickup", "charging"),
         ("pickup", "waiting"),
         ("pickup", "take_qty"),
         ("return_auto", "returned_qty"),
+        ("return_auto", "returned_e4"),
+        ("return_auto", "returned_e5"),
         ("return_auto", "ready_returned"),
+        ("return_auto", "ready_e4"),
+        ("return_auto", "ready_e5"),
         ("pickup_manual_charge_check", "manual_charge_qty"),
     }
 
@@ -2274,24 +2539,260 @@ def handle_driver_flow(text, user, chat_id):
             except Exception:
                 limit = 70
 
-            flow["type"] = "pickup_simple"
-            flow["step"] = "take_qty"
             flow["brand"] = brand
             flow["ready"] = ready
             flow["charging"] = charging
             flow["waiting"] = waiting
+            pending_qty = flow.get("qty")
+
+            if brand == "voi":
+                ready_e4, ready_e5, ready, untyped, configured = voi_ready_breakdown(item)
+                if ready <= 0:
+                    clear_driver_flow(user.id)
+                    return warehouse_stock_alarm_response(
+                        chat_id,
+                        "voi",
+                        "Kierowca próbuje pobrać baterie, ale stan GOTOWE wynosi 0.",
+                    )
+                if not configured or untyped > 0:
+                    clear_driver_flow(user.id)
+                    return warehouse_stock_alarm_response(
+                        chat_id,
+                        "voi",
+                        f"Gotowe razem: {ready}, ale podział E4/E5 nie jest uzupełniony (bez typu: {untyped}).",
+                    )
+
+                flow["type"] = "pickup_voi_types"
+                flow["step"] = "e4_qty"
+                flow["e4_qty"] = None
+                flow["e5_qty"] = None
+                flow["ready_e4"] = ready_e4
+                flow["ready_e5"] = ready_e5
+                data[key] = flow
+                save_driver_flow(data)
+
+                target_line = f"\nŁącznie chcesz pobrać: {pending_qty}. Suma E4 + E5 musi wynieść {pending_qty}.\n" if pending_qty else ""
+                return (
+                    "🚗 PICKUP — VOI\n\n"
+                    f"📦 Gotowe razem: {ready}\n"
+                    f"🔋 E4 gotowe: {ready_e4}\n"
+                    f"🔋 E5 gotowe: {ready_e5}\n"
+                    f"⏳ Oczekujące: {waiting}\n"
+                    f"🚦 Twój limit: {limit}\n"
+                    f"{target_line}\n"
+                    "1/2 Ile baterii E4 pobierasz?"
+                )
+
+            if ready <= 0:
+                clear_driver_flow(user.id)
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "lima",
+                    "Kierowca próbuje pobrać baterie, ale stan GOTOWE wynosi 0.",
+                )
+
+            flow["type"] = "pickup_simple"
+            flow["step"] = "take_qty"
             data[key] = flow
             save_driver_flow(data)
 
-            pending_qty = flow.get("qty")
             return (
                 f"🚗 PICKUP — {brand_label(brand).upper()}\n\n"
                 f"📦 Gotowe: {ready}\n"
-                
                 f"⏳ Oczekujące: {waiting}\n\n"
                 f"🚦 Twój limit: {limit}\n"
                 + (f"🚗 Chcesz zabrać: {pending_qty}\n\nWpisz tę liczbę jeszcze raz albo wpisz inną." if pending_qty else "\nIle baterii zabierasz?")
             )
+
+
+    if flow.get("type") == "pickup_voi_types":
+        if flow["step"] == "e4_qty":
+            flow["e4_qty"] = qty
+            flow["step"] = "e5_qty"
+            data[key] = flow
+            save_driver_flow(data)
+            return (
+                f"✅ VOI E4: {qty}\n\n"
+                "2/2 Ile baterii E5 pobierasz?"
+            )
+
+        if flow["step"] == "e5_qty":
+            e4_qty = int(flow.get("e4_qty", 0) or 0)
+            e5_qty = qty
+            total_qty = e4_qty + e5_qty
+
+            if total_qty < 1:
+                return "🚨 Musisz pobrać co najmniej 1 baterię."
+
+            pending_qty = flow.get("qty")
+            if pending_qty is not None and int(pending_qty) != total_qty:
+                return (
+                    f"❌ Suma się nie zgadza.\n\n"
+                    f"Wpisałeś wcześniej pickup {pending_qty}.\n"
+                    f"E4 ({e4_qty}) + E5 ({e5_qty}) = {total_qty}.\n\n"
+                    f"Wpisz ponownie liczbę E5, aby suma wyniosła {pending_qty}, albo wpisz: anuluj"
+                )
+
+            try:
+                limit = get_driver_battery_limit(user)
+            except Exception:
+                limit = 70
+
+            if total_qty > limit:
+                return (
+                    f"❌ Nie możesz zabrać {total_qty} baterii.\n\n"
+                    f"Twój aktualny limit: {limit}."
+                )
+
+            inv = load_inventory()
+            item = brand_item(inv, "voi")
+            ready_e4, ready_e5, ready, untyped, configured = voi_ready_breakdown(item)
+            waiting = int(item.get("waiting", 0))
+
+            if ready <= 0 or not configured or untyped > 0:
+                clear_driver_flow(user.id)
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    "Stan VOI jest pusty albo nie ma aktualnego podziału gotowych E4/E5.",
+                )
+            if e4_qty > ready_e4:
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    f"Kierowca chce E4: {e4_qty}, a w systemie E4 gotowe: {ready_e4}.",
+                )
+            if e5_qty > ready_e5:
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    f"Kierowca chce E5: {e5_qty}, a w systemie E5 gotowe: {ready_e5}.",
+                )
+            if total_qty > ready:
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    f"Kierowca chce razem: {total_qty}, a w systemie gotowe razem: {ready}.",
+                )
+
+            flow["e5_qty"] = e5_qty
+            flow["ready_e4"] = ready_e4
+            flow["ready_e5"] = ready_e5
+            flow["qty"] = total_qty
+            flow["ready"] = ready
+            flow["waiting"] = waiting
+            flow["step"] = "confirm"
+            data[key] = flow
+            save_driver_flow(data)
+
+            return (
+                (
+                    "✅ PODSUMOWANIE PICKUP — VOI\n\n"
+                    f"🔋 E4: {e4_qty}\n"
+                    f"🔋 E5: {e5_qty}\n"
+                    f"🚗 Razem zabierasz: {total_qty}\n\n"
+                    f"📦 Gotowe VOI teraz: {ready}\n"
+                    f"   ↳ E4 teraz: {ready_e4}, po pobraniu: {ready_e4 - e4_qty}\n"
+                    f"   ↳ E5 teraz: {ready_e5}, po pobraniu: {ready_e5 - e5_qty}\n"
+                    f"📦 Gotowe VOI po pobraniu: {ready - total_qty}\n\n"
+                    "🟢 OK / ✏️ Edit / 🔴 Cancel"
+                ),
+                get_confirm_keyboard()
+            )
+
+        if flow["step"] == "confirm":
+            if is_edit_text(t):
+                flow["step"] = "e4_qty"
+                flow["e4_qty"] = None
+                flow["e5_qty"] = None
+                data[key] = flow
+                save_driver_flow(data)
+                return "✏️ Poprawiamy pickup VOI. Ile baterii E4 pobierasz?"
+
+            if not is_ok_text(t):
+                return (
+                    "Kliknij tylko:\n"
+                    "🟢 OK\n"
+                    "✏️ Edit\n"
+                    "🔴 Cancel",
+                    get_confirm_keyboard()
+                )
+
+            e4_qty = int(flow.get("e4_qty", 0) or 0)
+            e5_qty = int(flow.get("e5_qty", 0) or 0)
+            total_qty = e4_qty + e5_qty
+
+            inv = load_inventory()
+            item = brand_item(inv, "voi")
+            ready_e4, ready_e5, ready, untyped, configured = voi_ready_breakdown(item)
+            if ready <= 0 or not configured or untyped > 0:
+                clear_driver_flow(user.id)
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    "Stan VOI jest pusty albo Michał nie uzupełnił podziału E4/E5.",
+                )
+            if e4_qty > ready_e4 or e5_qty > ready_e5 or total_qty > ready:
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    f"Stan zmienił się przed zatwierdzeniem. E4: {ready_e4}, E5: {ready_e5}, razem: {ready}.",
+                )
+
+            db = load_db()
+            existing = active_trip(db, user.id, user)
+            if existing:
+                clear_driver_flow(user.id)
+                return f"Uwaga: masz już aktywną trasę ({existing['qty']} baterii). Najpierw wpisz: Return"
+
+            start_time = now()
+            deadline = start_time + timedelta(hours=trip_time_limit_hours(total_qty))
+            try:
+                limit_at_start = get_driver_battery_limit(user)
+            except Exception:
+                limit_at_start = 70
+
+            db["trips"].append({
+                "driver": get_driver_name(user),
+                "user_id": str(user.id),
+                "chat_id": chat_id,
+                "start": start_time.isoformat(),
+                "qty": total_qty,
+                "company": "voi",
+                "battery_types": {"E4": e4_qty, "E5": e5_qty},
+                "e4_qty": e4_qty,
+                "e5_qty": e5_qty,
+                "limit_at_start": limit_at_start,
+                "time_limit_hours": trip_time_limit_hours(total_qty),
+                "end": None,
+                "alert_sent": False
+            })
+            save_db(db)
+
+            if not take_voi_ready_types(item, e4_qty, e5_qty):
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    "voi",
+                    "Nie udało się odjąć E4/E5. Michał musi uzupełnić aktualny stan magazynu.",
+                )
+            inv = manual_inventory_total_from_brands(inv)
+            save_inventory(inv)
+            clear_driver_flow(user.id)
+
+            return (
+                "✅ PICKUP ZAPISANY — VOI\n\n"
+                f"Kierowca: {get_driver_name(user)}\n"
+                f"Start: {start_time.strftime('%H:%M')}\n"
+                f"E4: {e4_qty}\n"
+                f"E5: {e5_qty}\n"
+                f"Pobrane razem: {total_qty}\n"
+                f"Limit czasu: {trip_time_limit_hours(total_qty)}h\n"
+                f"Deadline: {deadline.strftime('%H:%M')}\n\n"
+                f"{status_report()}"
+            )
+
+        clear_driver_flow(user.id)
+        return "⚠️ Pickup VOI się zaciął. Wpisz pickup jeszcze raz."
 
 
     if flow.get("type") == "pickup_simple":
@@ -2317,6 +2818,13 @@ def handle_driver_flow(text, user, chat_id):
             charging = int(item.get("charging", 0))
             waiting = int(item.get("waiting", 0))
 
+            if ready <= 0:
+                clear_driver_flow(user.id)
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    brand,
+                    "Kierowca próbuje pobrać baterie, ale stan GOTOWE wynosi 0.",
+                )
             if qty > ready:
                 return f"❌ Gotowych jest tylko: {ready}"
 
@@ -2358,6 +2866,13 @@ def handle_driver_flow(text, user, chat_id):
             item = brand_item(inv, brand)
             ready = int(item.get("ready", 0))
 
+            if ready <= 0:
+                clear_driver_flow(user.id)
+                return warehouse_stock_alarm_response(
+                    chat_id,
+                    brand,
+                    "Kierowca próbuje zatwierdzić pickup, ale stan GOTOWE wynosi 0.",
+                )
             if qty_take > ready:
                 return f"❌ Gotowych jest teraz tylko {ready}. Kliknij ✏️ Edit albo zacznij pickup od nowa."
 
@@ -2619,6 +3134,51 @@ def handle_driver_flow(text, user, chat_id):
     if flow.get("type") == "return_auto":
         route_qty = int(flow.get("route_qty", 0))
 
+        if flow["step"] == "returned_e4":
+            route_e4 = int(flow.get("route_e4", 0) or 0)
+            types_known = bool(flow.get("voi_types_known"))
+            if types_known and qty > route_e4:
+                return f"❌ Nie możesz oddać {qty} baterii E4, bo pobrałeś E4: {route_e4}."
+
+            flow["returned_e4"] = qty
+            flow["step"] = "returned_e5"
+            data[key] = flow
+            save_driver_flow(data)
+
+            route_e5 = int(flow.get("route_e5", 0) or 0)
+            limit_line = f" (pobrałeś E5: {route_e5})" if types_known else ""
+            return (
+                f"✅ Oddane E4: {qty}\n\n"
+                f"2/5 Ile baterii E5 oddajesz?{limit_line}"
+            )
+
+        if flow["step"] == "returned_e5":
+            returned_e4 = int(flow.get("returned_e4", 0) or 0)
+            returned_e5 = qty
+            route_e5 = int(flow.get("route_e5", 0) or 0)
+            types_known = bool(flow.get("voi_types_known"))
+
+            if types_known and returned_e5 > route_e5:
+                return f"❌ Nie możesz oddać {returned_e5} baterii E5, bo pobrałeś E5: {route_e5}."
+
+            returned_total = returned_e4 + returned_e5
+            if returned_total < 1:
+                return "🚨 Nie można oddać 0 baterii. Minimum to 1."
+            if returned_total > route_qty:
+                return f"❌ E4 + E5 = {returned_total}, a w trasie masz łącznie {route_qty}."
+
+            flow["returned_e5"] = returned_e5
+            flow["returned"] = returned_total
+            flow["step"] = "ready_e4"
+            data[key] = flow
+            save_driver_flow(data)
+
+            return (
+                f"✅ Zwrot VOI: E4 = {returned_e4}, E5 = {returned_e5}, razem = {returned_total}\n\n"
+                f"3/5 Ile z oddanych E4 jest GOTOWYCH? (maks. {returned_e4})\n\n"
+                "Możesz wpisać 0."
+            )
+
         if flow["step"] == "returned_qty":
             if qty < 1:
                 return "🚨 Nie można oddać 0. Minimum to 1."
@@ -2635,6 +3195,64 @@ def handle_driver_flow(text, user, chat_id):
                 "2/3 Ile z oddanych baterii jest GOTOWYCH?\n\n"
                 "Przykład:\n"
                 "Pobrałeś 50, oddajesz 50, gotowe są 3 → wpisz 3."
+            )
+
+        if flow["step"] == "ready_e4":
+            returned_e4 = int(flow.get("returned_e4", 0) or 0)
+            if qty > returned_e4:
+                return f"❌ Gotowych E4 nie może być więcej niż oddanych E4: {returned_e4}."
+
+            flow["ready_returned_e4"] = qty
+            flow["step"] = "ready_e5"
+            data[key] = flow
+            save_driver_flow(data)
+            returned_e5 = int(flow.get("returned_e5", 0) or 0)
+            return (
+                f"✅ Gotowe E4: {qty}\n\n"
+                f"4/5 Ile z oddanych E5 jest GOTOWYCH? (maks. {returned_e5})\n\n"
+                "Możesz wpisać 0."
+            )
+
+        if flow["step"] == "ready_e5":
+            returned_e4 = int(flow.get("returned_e4", 0) or 0)
+            returned_e5 = int(flow.get("returned_e5", 0) or 0)
+            ready_e4 = int(flow.get("ready_returned_e4", 0) or 0)
+            ready_e5 = qty
+            if ready_e5 > returned_e5:
+                return f"❌ Gotowych E5 nie może być więcej niż oddanych E5: {returned_e5}."
+
+            returned = int(flow.get("returned", 0) or 0)
+            ready_returned = ready_e4 + ready_e5
+            used_returned = returned - ready_returned
+            route_qty = int(flow.get("route_qty", 0) or 0)
+            missing = route_qty - returned
+
+            flow["ready_returned_e5"] = ready_e5
+            flow["ready_returned"] = ready_returned
+            flow["used_returned"] = used_returned
+            flow["to_charging"] = 0
+            flow["to_waiting"] = used_returned
+            flow["missing_to_ready"] = 0
+            flow["next_action"] = "finish"
+            flow["take_extra"] = 0
+            flow["step"] = "confirm_return_auto"
+            data[key] = flow
+            save_driver_flow(data)
+
+            missing_line = f"\n⚠️ Brakuje do pełnego zwrotu: {missing}\n" if missing > 0 else ""
+            return (
+                (
+                    "✅ BOT ROZDZIELIŁ ZWROT VOI:\n\n"
+                    f"Pobrane na trasę: {route_qty}\n"
+                    f"🔋 E4 oddane: {returned_e4} | gotowe: {ready_e4}\n"
+                    f"🔋 E5 oddane: {returned_e5} | gotowe: {ready_e5}\n"
+                    f"Oddane razem: {returned}\n"
+                    f"📦 Gotowe przywiezione razem: {ready_returned}\n"
+                    f"🔋 Rozładowane/oczekujące: {used_returned}\n"
+                    f"{missing_line}\n"
+                    "5/5 Wybierz opcję:"
+                ),
+                get_confirm_keyboard()
             )
 
         if flow["step"] == "ready_returned":
@@ -2667,19 +3285,26 @@ def handle_driver_flow(text, user, chat_id):
 
             missing_line = f"\n⚠️ Brakuje do pełnego zwrotu: {missing}\n" if missing > 0 else ""
             moved_line = ""
+            type_lines = ""
+            confirm_step = "3/3"
+            if brand == "voi":
+                returned_e4 = int(flow.get("returned_e4", 0) or 0)
+                returned_e5 = int(flow.get("returned_e5", 0) or 0)
+                type_lines = f"🔋 E4 oddane: {returned_e4}\n🔋 E5 oddane: {returned_e5}\n"
+                confirm_step = "4/4"
 
             return (
                 (
                     "✅ BOT ROZDZIELIŁ ZWROT:\n\n"
                     f"Pobrane na trasę: {route_qty}\n"
+                    f"{type_lines}"
                     f"Oddane razem: {returned}\n"
                     f"📦 Gotowe przywiezione: {ready_returned}\n"
                     f"🔋 Rozładowane/oczekujące: {used_returned}\n"
-                    
                     f"➡️ Rozładowane: wpisujesz ręcznie osobną komendą\n"
                     f"➡️ Oczekujące: {used_returned}\n"
                     f"{missing_line}\n"
-                    "3/3 Wybierz opcję:"
+                    f"{confirm_step} Wybierz opcję:"
                 ),
                 get_confirm_keyboard()
             )
@@ -2687,11 +3312,19 @@ def handle_driver_flow(text, user, chat_id):
         if flow["step"] == "confirm_return_auto":
             if is_edit_text(t):
                 flow["confirm_blocked"] = False
-                flow["step"] = "ready_returned"
+                brand = flow.get("brand", "lima")
+                flow["step"] = "ready_e4" if brand == "voi" else "ready_returned"
                 data[key] = flow
                 save_driver_flow(data)
                 audit_log("return_confirm_edit", user, chat_id, {"flow": flow})
                 returned = int(flow.get("returned", 0))
+                if brand == "voi":
+                    returned_e4 = int(flow.get("returned_e4", 0) or 0)
+                    return (
+                        "✏️ OK, poprawiamy gotowe VOI.\n\n"
+                        f"Oddane razem zostaje: {returned}\n"
+                        f"Podaj ponownie: ile z oddanych E4 jest GOTOWYCH? (maks. {returned_e4})"
+                    )
                 return (
                     "✏️ OK, poprawiamy zwrot.\n\n"
                     f"Oddane razem zostaje: {returned}\n"
@@ -2762,6 +3395,8 @@ def handle_driver_flow(text, user, chat_id):
             original_qty = int(trip.get("qty", 0))
             returned = int(flow.get("returned", 0))
             ready_returned = int(flow.get("ready_returned", 0))
+            ready_returned_e4 = int(flow.get("ready_returned_e4", 0) or 0)
+            ready_returned_e5 = int(flow.get("ready_returned_e5", 0) or 0)
             used_returned = int(flow.get("used_returned", returned - ready_returned))
 
             if returned > original_qty:
@@ -2773,6 +3408,15 @@ def handle_driver_flow(text, user, chat_id):
                 return "❌ Gotowe nie mogą być większe niż oddane. Zacznij zwrot od nowa."
 
             brand = trip_company(trip)
+            if brand == "voi":
+                returned_e4_check = int(flow.get("returned_e4", 0) or 0)
+                returned_e5_check = int(flow.get("returned_e5", 0) or 0)
+                if ready_returned_e4 > returned_e4_check or ready_returned_e5 > returned_e5_check:
+                    clear_driver_flow(user.id)
+                    return "❌ Gotowe E4/E5 nie mogą być większe niż oddane danego typu. Zacznij zwrot od nowa."
+                if ready_returned != ready_returned_e4 + ready_returned_e5:
+                    clear_driver_flow(user.id)
+                    return "❌ Suma gotowych E4/E5 jest niespójna. Zacznij zwrot od nowa."
             to_charging = 0
             to_waiting = used_returned
 
@@ -2787,6 +3431,18 @@ def handle_driver_flow(text, user, chat_id):
 
             trip["end"] = end_time.isoformat()
             trip["returned"] = returned
+            if brand == "voi":
+                returned_e4 = int(flow.get("returned_e4", 0) or 0)
+                returned_e5 = int(flow.get("returned_e5", 0) or 0)
+                trip["returned_battery_types"] = {"E4": returned_e4, "E5": returned_e5}
+                trip["returned_e4"] = returned_e4
+                trip["returned_e5"] = returned_e5
+                trip["ready_returned_battery_types"] = {
+                    "E4": ready_returned_e4,
+                    "E5": ready_returned_e5,
+                }
+                trip["ready_returned_e4"] = ready_returned_e4
+                trip["ready_returned_e5"] = ready_returned_e5
             trip["ready_returned"] = ready_returned
             trip["work_qty"] = max(0, returned - ready_returned)
             trip["used_returned"] = used_returned
@@ -2808,7 +3464,10 @@ def handle_driver_flow(text, user, chat_id):
 
             inv = load_inventory()
             item = brand_item(inv, brand)
-            item["ready"] = int(item.get("ready", 0)) + ready_returned
+            if brand == "voi":
+                add_voi_ready_types(item, ready_returned_e4, ready_returned_e5)
+            else:
+                item["ready"] = int(item.get("ready", 0)) + ready_returned
             item["charging"] = int(item.get("charging", 0)) + to_charging
             item["waiting"] = int(item.get("waiting", 0)) + to_waiting
             inv = manual_inventory_total_from_brands(inv)
@@ -2825,10 +3484,18 @@ def handle_driver_flow(text, user, chat_id):
 
             auto_move_line = ""
 
+            return_type_lines = ""
+            if brand == "voi":
+                return_type_lines = (
+                    f"E4 oddane: {int(flow.get('returned_e4', 0) or 0)} | gotowe: {ready_returned_e4}\n"
+                    f"E5 oddane: {int(flow.get('returned_e5', 0) or 0)} | gotowe: {ready_returned_e5}\n"
+                )
+
             return (
                 f"✅ ZWROT ZAPISANY — {brand_label(brand).upper()}\n\n"
                 f"Kierowca: {get_driver_name(user)}\n"
                 f"Pobrane: {original_qty}\n"
+                f"{return_type_lines}"
                 f"Oddane razem: {returned}\n"
                 f"Gotowe przywiezione: {ready_returned}\n"
                 f"Zrobione do statystyk: {max(0, returned - ready_returned)}\n"
@@ -2844,7 +3511,7 @@ def handle_driver_flow(text, user, chat_id):
     return None
 
 
-RESET_WIZARD_FILE = "telegram_reset_wizard.json"
+RESET_WIZARD_FILE = data_path("telegram_reset_wizard.json")
 
 
 def load_reset_wizard():
@@ -2965,7 +3632,8 @@ def handle_reset_wizard(text, user, chat_id):
         else:
             save_jobs({"jobs": []})
 
-        db = {"trips": []}
+        create_data_backup("before-reset-wizard-save")
+        db = {"trips": completed_trip_history()}
         for trip in wiz.get("trips", []):
             db["trips"].append({
                 "driver": trip["driver"],
@@ -3236,7 +3904,8 @@ def reset_all_command(text):
     if t not in ["reset", "reset wszystko", "reset system"]:
         return None
 
-    save_db({"trips": []})
+    create_data_backup("before-reset-system")
+    kept_history = keep_completed_history_only()
     save_inventory({
         "depot_total": 0,
         "ready": 0,
@@ -3250,7 +3919,8 @@ def reset_all_command(text):
     return (
         "✅ RESET SYSTEMU ZROBIONY\n\n"
         "Wyczyszczono:\n"
-        "🚗 trasy\n"
+        "🚗 aktywne trasy\n"
+        f"🧠 Zachowano zakończone trasy w historii: {kept_history}\n"
         "📦 magazyn\n"
         "🔌 ładowania\n\n"
         "Teraz wpisz stany i kierowców od nowa, np.:\n"
@@ -3424,7 +4094,8 @@ def update_all_command(text, chat_id=None, reset_trips=False):
     save_inventory(inv)
 
     if " reset " in f" {t} " or reset_trips:
-        save_db({"trips": []})
+        create_data_backup("before-update-all-reset")
+        keep_completed_history_only()
 
     return (
         "✅ AKTUALIZACJA ZAPISANA\n\n"
@@ -4122,13 +4793,133 @@ def resolve_driver_for_admin(query):
 
 def company_key(company):
     c = normalize_text(str(company or "")).strip()
-    if c in ["voi", "v", "blue", "🔵 voi"]:
+    if c in ["voi", "woi", "voy", "v", "blue", "🔵 voi"]:
         return "voi"
     return "lima"
 
 
 def company_label(company):
     return "🔵 VOI" if company_key(company) == "voi" else "🟢 LIMA"
+
+
+def ensure_voi_ready_fields(company_item):
+    """Dodaje pola E4/E5 bez utraty starego łącznego stanu GOTOWE."""
+    had_type_fields = "ready_e4" in company_item or "ready_e5" in company_item
+    company_item.setdefault("ready_e4", 0)
+    company_item.setdefault("ready_e5", 0)
+
+    try:
+        company_item["ready_e4"] = max(0, int(company_item.get("ready_e4", 0) or 0))
+    except Exception:
+        company_item["ready_e4"] = 0
+    try:
+        company_item["ready_e5"] = max(0, int(company_item.get("ready_e5", 0) or 0))
+    except Exception:
+        company_item["ready_e5"] = 0
+
+    typed_total = company_item["ready_e4"] + company_item["ready_e5"]
+    try:
+        ready_total = max(0, int(company_item.get("ready", 0) or 0))
+    except Exception:
+        ready_total = 0
+
+    # Nigdy nie kasujemy starych gotowych. Jeżeli wcześniej istniał tylko stan
+    # łączny, zostaje on jako nieprzypisany do E4/E5 do czasu wpisu Michała.
+    company_item["ready"] = max(ready_total, typed_total)
+
+    if "ready_types_configured" not in company_item:
+        company_item["ready_types_configured"] = bool(
+            had_type_fields and company_item["ready"] == typed_total
+        )
+
+    return company_item
+
+
+def voi_ready_breakdown(company_item):
+    company_item = ensure_voi_ready_fields(company_item)
+    e4 = int(company_item.get("ready_e4", 0) or 0)
+    e5 = int(company_item.get("ready_e5", 0) or 0)
+    total = int(company_item.get("ready", 0) or 0)
+    untyped = max(0, total - e4 - e5)
+    configured = bool(company_item.get("ready_types_configured")) and untyped == 0
+    return e4, e5, total, untyped, configured
+
+
+def set_voi_ready_types(e4, e5):
+    e4 = max(0, int(e4))
+    e5 = max(0, int(e5))
+    inv = load_company_inventory()
+    voi = inv.setdefault("companies", {}).setdefault("voi", {"total": 0, "ready": 0})
+    ensure_voi_ready_fields(voi)
+    voi["ready_e4"] = e4
+    voi["ready_e5"] = e5
+    voi["ready"] = e4 + e5
+    voi["ready_types_configured"] = True
+    voi["charging"] = 0
+    voi["waiting"] = max(
+        0,
+        int(voi.get("total", 0) or 0)
+        - int(voi.get("ready", 0) or 0)
+        - active_in_transit_by_company("voi"),
+    )
+    save_company_inventory(inv)
+    return e4, e5, e4 + e5
+
+
+def add_voi_ready_types(company_item, e4, e5):
+    """Dodaje gotowe ze zwrotu i zachowuje ewentualny stary stan bez typu."""
+    company_item = ensure_voi_ready_fields(company_item)
+    old_e4, old_e5, old_total, untyped, configured = voi_ready_breakdown(company_item)
+    e4 = max(0, int(e4))
+    e5 = max(0, int(e5))
+    company_item["ready_e4"] = old_e4 + e4
+    company_item["ready_e5"] = old_e5 + e5
+    company_item["ready"] = old_total + e4 + e5
+    # Gdy wcześniej nie było żadnych nieprzypisanych gotowych, znamy już pełny podział.
+    company_item["ready_types_configured"] = bool(configured or untyped == 0)
+    return company_item
+
+
+def take_voi_ready_types(company_item, e4, e5):
+    company_item = ensure_voi_ready_fields(company_item)
+    ready_e4, ready_e5, total, untyped, configured = voi_ready_breakdown(company_item)
+    e4 = max(0, int(e4))
+    e5 = max(0, int(e5))
+    if not configured or untyped > 0:
+        return False
+    if e4 > ready_e4 or e5 > ready_e5:
+        return False
+    company_item["ready_e4"] = ready_e4 - e4
+    company_item["ready_e5"] = ready_e5 - e5
+    company_item["ready"] = company_item["ready_e4"] + company_item["ready_e5"]
+    company_item["ready_types_configured"] = True
+    return True
+
+
+def warehouse_stock_alarm_response(chat_id, company, reason=""):
+    comp = company_key(company)
+    label = "VOI" if comp == "voi" else "LIMA"
+    examples = (
+        "VOI GOTOWE 71 — potem wpisz E4 i E5\n"
+        "albo: VOI GOTOWE E4 20 E5 51"
+        if comp == "voi"
+        else "LIMA GOTOWE 383"
+    )
+    alarm = (
+        f"🚨 ALARM MAGAZYNU {label}\n\n"
+        "Michał Pietrzak — uzupełnij stan magazynu.\n"
+        f"{reason.strip()}\n\n"
+        f"Komenda: {examples}"
+    ).strip()
+
+    group_chat_id = load_group().get("chat_id")
+    if group_chat_id and str(group_chat_id) != str(chat_id):
+        return {
+            "send_to": group_chat_id,
+            "text": alarm,
+            "confirm": alarm,
+        }
+    return alarm
 
 
 def load_company_inventory():
@@ -4425,12 +5216,12 @@ def save_van_kwh_entry(user, chat_id, kwh):
 
 def van_week_bounds(reference=None):
     current = reference or now()
-    monday = (current - timedelta(days=current.weekday())).replace(hour=0, minute=1, second=0, microsecond=0)
-    sunday_end = monday + timedelta(days=6, hours=23, minutes=58)
+    monday = (current - timedelta(days=current.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    sunday_end = monday + timedelta(days=7) - timedelta(microseconds=1)
     return monday, sunday_end
 
 
-def van_report_text(reference=None):
+def van_report_text(reference=None, heading="🔌 RAPORT VAN"):
     week_start, week_end = van_week_bounds(reference)
     data = load_van_charging()
 
@@ -4465,7 +5256,7 @@ def van_report_text(reference=None):
         total_cost += cost
 
     lines = [
-        "🔌 RAPORT VAN",
+        heading,
         "",
         f"Okres: {week_start.strftime('%d/%m %H:%M')} – {week_end.strftime('%d/%m %H:%M')}",
         f"Stawka: £{VAN_KWH_RATE:.2f} / kWh",
@@ -4473,7 +5264,7 @@ def van_report_text(reference=None):
     ]
 
     if not totals:
-        lines.append("Brak wpisów VAN w tym tygodniu.")
+        lines.append("Brak wpisów VAN w wybranym tygodniu.")
         return "\n".join(lines)
 
     for driver, item in sorted(totals.items(), key=lambda x: x[0].lower()):
@@ -4509,7 +5300,104 @@ def maybe_send_weekly_van_report(application=None):
     data["last_auto_report_week"] = week_key
     save_van_charging(data)
 
-    return van_report_text(current - timedelta(days=1))
+    return van_report_text(
+        current - timedelta(days=1),
+        heading="🔌 RAPORT VAN — POPRZEDNI TYDZIEŃ"
+    )
+
+
+
+def previous_week_bounds(reference=None):
+    current = reference or now()
+    this_monday = (current - timedelta(days=current.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start = this_monday - timedelta(days=7)
+    end = this_monday - timedelta(microseconds=1)
+    return start, end
+
+
+def van_summary_between(start_dt, end_dt):
+    totals = {}
+    total_kwh = 0.0
+    total_cost = 0.0
+    total_count = 0
+
+    for entry in load_van_charging().get("entries", []):
+        try:
+            created = datetime.fromisoformat(entry.get("created_at"))
+        except Exception:
+            continue
+        if not (start_dt <= created <= end_dt):
+            continue
+
+        driver = display_driver_name(entry.get("driver", "Nieznany"))
+        kwh = float(entry.get("kwh", 0) or 0)
+        cost = float(entry.get("cost", round(kwh * VAN_KWH_RATE, 2)) or 0)
+        item = totals.setdefault(driver, {"count": 0, "kwh": 0.0, "cost": 0.0})
+        item["count"] += 1
+        item["kwh"] += kwh
+        item["cost"] += cost
+        total_count += 1
+        total_kwh += kwh
+        total_cost += cost
+
+    return {
+        "count": total_count,
+        "kwh": total_kwh,
+        "cost": total_cost,
+        "drivers": totals,
+    }
+
+
+def previous_week_statistics_text():
+    start_dt, end_dt = previous_week_bounds()
+    lines = [
+        "📊 STATYSTYKI — POPRZEDNI TYDZIEŃ",
+        f"Okres: {start_dt.strftime('%d/%m/%Y %H:%M')} – {end_dt.strftime('%d/%m/%Y %H:%M')}",
+        "",
+    ]
+
+    company_totals = {"tasks": 0, "batteries": 0}
+    for key, label in [("lima", "🟢 LIMA"), ("voi", "🔵 VOI")]:
+        summary = completed_tasks_count_by_company(start_dt, end_dt, key)
+        company_totals["tasks"] += summary["tasks"]
+        company_totals["batteries"] += summary["batteries"]
+
+        lines.append(label)
+        lines.append(f"• Zakończone trasy: {summary['tasks']}")
+        lines.append(f"• Wykonane baterie: {summary['batteries']}")
+        if summary["drivers"]:
+            lines.append("• Kierowcy:")
+            for name, item in sorted(
+                summary["drivers"].items(),
+                key=lambda x: (x[1]["batteries"], x[1]["tasks"]),
+                reverse=True,
+            ):
+                lines.append(f"  - {name}: {item['batteries']} baterii / {item['tasks']} tras")
+        lines.append("")
+
+    lines.extend([
+        "📦 RAZEM LIMA + VOI",
+        f"• Trasy: {company_totals['tasks']}",
+        f"• Wykonane baterie: {company_totals['batteries']}",
+        "",
+    ])
+
+    van = van_summary_between(start_dt, end_dt)
+    lines.append("🚐 ŁADOWANIE VANÓW")
+    lines.append(f"• Wpisy: {van['count']}")
+    lines.append(f"• Energia: {van['kwh']:.3f} kWh")
+    lines.append(f"• Do zapłaty: £{van['cost']:.2f}")
+    if van["drivers"]:
+        lines.append("• Kierowcy:")
+        for name, item in sorted(van["drivers"].items(), key=lambda x: x[1]["kwh"], reverse=True):
+            lines.append(
+                f"  - {name}: {item['kwh']:.3f} kWh / £{item['cost']:.2f} / {item['count']} wpisów"
+            )
+
+    return "\n".join(lines).rstrip()
+
 
 
 
@@ -4520,10 +5408,54 @@ def handle_command(text, user, chat_id):
     if t in ["van", "/van"]:
         return start_van_flow(user, chat_id)
 
+    if t in [
+        "raport van poprzedni tydzien",
+        "raport van poprzedni tydzień",
+        "raport van zeszly tydzien",
+        "raport van zeszły tydzień",
+        "van raport poprzedni tydzien",
+        "/raportvanpoprzedni"
+    ]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return van_report_text(
+            now() - timedelta(days=7),
+            heading="🔌 RAPORT VAN — POPRZEDNI TYDZIEŃ"
+        )
+
     if t in ["raport van", "/raportvan", "van raport", "report van"]:
         if not is_admin(user):
             return "❌ Brak dostępu."
-        return van_report_text()
+        return van_report_text(heading="🔌 RAPORT VAN — BIEŻĄCY TYDZIEŃ")
+
+
+    if t in [
+        "raport poprzedni tydzien",
+        "raport poprzedni tydzień",
+        "raport zeszly tydzien",
+        "raport zeszły tydzień",
+        "statystyki poprzedni tydzien",
+        "statystyki poprzedni tydzień",
+        "/raportpoprzedni",
+    ]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return previous_week_statistics_text()
+
+    if t in ["pamiec", "pamięć", "stan pamieci", "stan pamięci"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return memory_status_text()
+
+    if t in ["backup danych", "kopia danych", "pobierz pamiec", "pobierz pamięć"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        archive_path = create_data_backup("telegram-manual")
+        return {
+            "document_path": archive_path,
+            "caption": "🧠 Pełna kopia pamięci bota",
+            "confirm": "✅ Kopia danych została utworzona i wysłana.",
+        }
 
 
     # ADMIN_RESET_COMPANY_WAREHOUSE
@@ -4605,11 +5537,18 @@ def handle_command(text, user, chat_id):
         return manual_result
 
 
-    # MANUAL BRAND INVENTORY COMMANDS — Lima/Voi
-    brand_reply = set_brand_inventory_command(text)
-    if brand_reply:
+    # STARE KOMENDY MAGAZYNU — tylko pełny administrator.
+    # Ograniczony magazynier korzysta wyłącznie z FINAL_SIMPLE_WAREHOUSE_HOOK powyżej.
+    brand_reply = None
+    legacy_inventory_match = re.match(
+        r"^(lima|lim|lime|voi|woi|voy)\s+(ilosc|ilość|total|depo|magazyn|gotowe|gotowych|wlozone|włożone|ladowarki|ładowarki|oczekuje|oczekuja|oczekujace|oczekujące)\b",
+        t
+    )
+    if legacy_inventory_match:
         if not is_admin(user):
             return "❌ Brak dostępu."
+        brand_reply = set_brand_inventory_command(text)
+    if brand_reply:
         return brand_reply
 
     # Wyłączony moduł automatycznych ładowarek/portów/timerów/F/G.
@@ -5079,7 +6018,9 @@ def handle_command(text, user, chat_id):
 
     if returned_qty is not None:
         reply = start_return_flow(user, chat_id)
-        if returned_qty >= 0:
+        current_flow = load_driver_flow().get(user_id, {})
+        # Dla VOI liczby nie podstawiamy automatycznie, bo trzeba osobno podać E4 i E5.
+        if returned_qty >= 0 and current_flow.get("step") == "returned_qty":
             flow_reply = handle_driver_flow(str(returned_qty), user, chat_id)
             if flow_reply:
                 return reply + "\n\n" + flow_reply
@@ -5174,8 +6115,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text, reply_keyboard = reply
         await update.message.reply_text(reply_text, reply_markup=reply_keyboard)
     elif isinstance(reply, dict):
-        await context.bot.send_message(chat_id=reply["send_to"], text=reply["text"])
-        await update.message.reply_text(reply.get("confirm", "✅ Gotowe."), reply_markup=keyboard)
+        if reply.get("document_path"):
+            with open(reply["document_path"], "rb") as document:
+                await context.bot.send_document(
+                    chat_id=reply.get("send_to", update.message.chat_id),
+                    document=document,
+                    caption=reply.get("caption", "Kopia danych"),
+                )
+            await update.message.reply_text(reply.get("confirm", "✅ Gotowe."), reply_markup=keyboard)
+        else:
+            await context.bot.send_message(chat_id=reply["send_to"], text=reply["text"])
+            await update.message.reply_text(reply.get("confirm", "✅ Gotowe."), reply_markup=keyboard)
     elif reply:
         await update.message.reply_text(reply, reply_markup=keyboard)
 
@@ -5341,10 +6291,12 @@ async def weekly_report_scheduler(app:  Application):
                 data = load_json(WEEKLY_REPORT_FILE, {"last_sent": None})
                 today_key = current.strftime("%Y-%m-%d")
 
+                chat_id = load_group().get("chat_id")
+
                 if data.get("last_sent") != today_key:
-                    chat_id = load_group().get("chat_id")
                     if chat_id:
-                        await app.bot.send_message(chat_id=chat_id, text=weekly_all_drivers_report())
+                        await app.bot.send_message(chat_id=chat_id, text=previous_week_statistics_text())
+                        create_data_backup("weekly-auto")
                         data["last_sent"] = today_key
                         save_json(WEEKLY_REPORT_FILE, data)
 
@@ -5404,7 +6356,7 @@ def manual_inventory_total_from_brands(inv):
 
 def company_key(company):
     c = normalize_text(str(company or "")).strip()
-    if c in ["voi", "v", "blue", "🔵 voi"]:
+    if c in ["voi", "woi", "voy", "v", "blue", "🔵 voi"]:
         return "voi"
     return "lima"
 
@@ -5423,6 +6375,8 @@ def load_company_inventory():
     for key in ["lima", "voi"]:
         companies[key].setdefault("total", 0)
         companies[key].setdefault("ready", 0)
+
+    ensure_voi_ready_fields(companies["voi"])
     return inv
 
 
@@ -5481,6 +6435,16 @@ def status_report():
         lines.append(label)
         lines.append(f"📦 Ilość: {total}")
         lines.append(f"✅ Gotowe: {ready}")
+
+        if key == "voi":
+            ready_e4, ready_e5, _, untyped, configured = voi_ready_breakdown(c)
+            lines.append(f"   ↳ E4 gotowe: {ready_e4}")
+            lines.append(f"   ↳ E5 gotowe: {ready_e5}")
+            if untyped > 0:
+                lines.append(f"⚠️ Bez przypisanego typu E4/E5: {untyped}")
+            if not configured:
+                lines.append("🚨 Michał: uzupełnij podział gotowych VOI na E4 i E5")
+
         lines.append(f"⏳ Oczekujące: {waiting}")
         lines.append(f"🚗 W trasie: {transit}")
 
@@ -5522,19 +6486,97 @@ def set_company_simple_field(company, field_raw, value):
 def handle_two_warehouse_manual_command(text, user, chat_id):
     t = normalize_text(text).strip()
 
-    # Dozwolone tylko:
-    # LIMA ILOSC 581 / LIMA GOTOWE 487
-    # VOI ILOSC 160 / VOI GOTOWE 94
-    m = re.match(r"^(lima|lim|voi|v)\s+(ilosc|ilość|gotowe)\s+(\d+)", t)
-    if m:
-        if not is_admin(user):
+    # VOI: szybki wpis obu typów w jednej wiadomości.
+    # Przykład: VOI GOTOWE E4 20 E5 51
+    m_types = re.match(
+        r"^(voi|woi|voy|v)\s+gotowe\s+e4\s+(\d+)\s+e5\s+(\d+)\s*$",
+        t,
+    )
+    if not m_types:
+        m_types = re.match(
+            r"^(voi|woi|voy|v)\s+e4\s+(\d+)\s+e5\s+(\d+)\s*$",
+            t,
+        )
+
+    if m_types:
+        if not can_manage_warehouse(user):
             return "❌ Brak dostępu."
+        ready_e4 = int(m_types.group(2))
+        ready_e5 = int(m_types.group(3))
+        ready_e4, ready_e5, total = set_voi_ready_types(ready_e4, ready_e5)
+        audit_log(
+            "warehouse_voi_ready_types_update",
+            user=user,
+            chat_id=chat_id,
+            details={"ready_e4": ready_e4, "ready_e5": ready_e5, "ready": total},
+        )
+        try:
+            clear_driver_flow(user.id)
+        except Exception:
+            pass
+        return (
+            "✅ 🔵 VOI — zapisano gotowe według typu\n\n"
+            f"E4 gotowe: {ready_e4}\n"
+            f"E5 gotowe: {ready_e5}\n"
+            f"Razem gotowe: {total}\n\n"
+            f"{status_report()}"
+        )
+
+    # VOI GOTOWE 71 rozpoczyna prosty kreator: najpierw E4, potem E5.
+    m_voi_ready = re.match(r"^(voi|woi|voy|v)\s+gotowe(?:\s+(\d+))?\s*$", t)
+    if m_voi_ready:
+        if not can_manage_warehouse(user):
+            return "❌ Brak dostępu."
+        expected_total = int(m_voi_ready.group(2)) if m_voi_ready.group(2) is not None else None
+        data = load_driver_flow()
+        data[str(user.id)] = {
+            "type": "warehouse_voi_ready_types",
+            "step": "ready_e4",
+            "chat_id": chat_id,
+            "driver": get_driver_name(user),
+            "created_at": now().isoformat(),
+            "expected_total": expected_total,
+            "ready_e4": None,
+            "ready_e5": None,
+        }
+        save_driver_flow(data)
+        total_line = (
+            f"Gotowe razem według Twojego wpisu: {expected_total}.\n"
+            if expected_total is not None else
+            "Bot policzy gotowe razem jako E4 + E5.\n"
+        )
+        return (
+            "🔵 UZUPEŁNIANIE MAGAZYNU VOI\n\n"
+            f"{total_line}\n"
+            "1/2 Ile jest GOTOWYCH baterii E4?"
+        )
+
+    # LIMA GOTOWE oraz ILOSC obu firm zostają proste.
+    m = re.match(r"^(lima|lim|lime|voi|woi|voy|v)\s+(ilosc|ilość|gotowe)\s+(\d+)", t)
+    if m:
+        if not can_manage_warehouse(user):
+            return "❌ Brak dostępu."
+
+        comp = company_key(m.group(1))
+        field_norm = normalize_text(m.group(2))
+        if comp == "voi" and field_norm == "gotowe":
+            return (
+                "⚠️ Dla VOI podaj gotowe osobno E4 i E5.\n\n"
+                "Wpisz: VOI GOTOWE 71 — bot zapyta o E4 i E5\n"
+                "albo: VOI GOTOWE E4 20 E5 51"
+            )
 
         result = set_company_simple_field(m.group(1), m.group(2), m.group(3))
         if not result:
             return "Nie rozumiem komendy."
 
         comp, field_name, value = result
+        audit_log(
+            "warehouse_manual_update",
+            user=user,
+            chat_id=chat_id,
+            details={"company": comp, "field": field_name, "value": value},
+        )
         try:
             clear_driver_flow(user.id)
         except Exception:
@@ -5547,9 +6589,9 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
         )
 
     # Blokujemy ladowarki/wlozone/oczekujace, bo oczekujące liczy bot.
-    m_block = re.match(r"^(lima|lim|voi|v)\s+(ladowarki|ładowarki|wlozone|włożone|wlozono|włożono|oczekujace|oczekujące)\s+(\d+)", t)
+    m_block = re.match(r"^(lima|lim|lime|voi|woi|voy|v)\s+(ladowarki|ładowarki|wlozone|włożone|wlozono|włożono|oczekujace|oczekujące)\s+(\d+)", t)
     if m_block:
-        if not is_admin(user):
+        if not can_manage_warehouse(user):
             return "❌ Brak dostępu."
         return (
             "⚠️ Tych pól już nie wpisujemy ręcznie.\n\n"
@@ -5557,13 +6599,13 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
             "LIMA ILOSC 581\n"
             "LIMA GOTOWE 487\n"
             "VOI ILOSC 160\n"
-            "VOI GOTOWE 94\n\n"
+            "VOI GOTOWE 94 — potem wpisz E4 i E5\n\n"
             "Oczekujące bot liczy sam:\n"
             "OCZEKUJĄCE = ILOŚĆ - GOTOWE - W TRASIE"
         )
 
     if re.match(r"^(gotowe|ladowarki|ładowarki|wlozone|włożone|oczekujace|oczekujące|ilosc|ilość)\s+\d+", t):
-        if not is_admin(user):
+        if not can_manage_warehouse(user):
             return "❌ Brak dostępu."
         return (
             "⚠️ Podaj firmę i używaj tylko ILOSC albo GOTOWE.\n\n"
@@ -5571,7 +6613,7 @@ def handle_two_warehouse_manual_command(text, user, chat_id):
             "LIMA ILOSC 581\n"
             "LIMA GOTOWE 487\n"
             "VOI ILOSC 160\n"
-            "VOI GOTOWE 94"
+            "VOI GOTOWE 94 — potem wpisz E4 i E5"
         )
 
     return None
@@ -5654,6 +6696,8 @@ def brand_item(inv, brand):
     item = companies.setdefault(comp, {"total": 0, "ready": 0})
     item.setdefault("total", 0)
     item.setdefault("ready", 0)
+    if comp == "voi":
+        ensure_voi_ready_fields(item)
     item["charging"] = 0
     item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
     return item
@@ -5665,6 +6709,8 @@ def manual_inventory_total_from_brands(inv):
         item = companies.setdefault(comp, {"total": 0, "ready": 0})
         item.setdefault("total", 0)
         item.setdefault("ready", 0)
+        if comp == "voi":
+            ensure_voi_ready_fields(item)
         item["charging"] = 0
         item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
 
@@ -5684,7 +6730,9 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     application.add_handler(MessageHandler(filters.COMMAND, text_handler))
-    print("Telegram Lime Battery Bot PRO v7.4 działa...")
+    print("Telegram Lime Battery Bot PRO v7.7 MEMORY + VOI E4/E5 READY + WAREHOUSE ALARM działa...")
+    print(f"Pamięć bota: {DATA_DIR}")
+    print(f"Railway Volume: {'AKTYWNY' if os.getenv('RAILWAY_VOLUME_MOUNT_PATH') else 'BRAK - dane mogą zniknąć po redeploy'}")
     application.run_polling()
 
 
