@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
+# MODE: NO BATTERY QUANTITY LIMITS — driver pickup is constrained only by available stock.
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TELEGRAM_TOKEN:
@@ -46,9 +48,9 @@ DATA_FILE_NAMES = [
     "telegram_driver_flow.json",
     "telegram_van_charging.json",
     "telegram_weekly_report.json",
+    "telegram_warehouse_handover.json",
     "telegram_drivers.json",
     "telegram_audit_log.json",
-    "telegram_driver_limits.json",
     "telegram_reset_wizard.json",
     "config.json",
 ]
@@ -94,9 +96,14 @@ DRIVER_FLOW_FILE = data_path("telegram_driver_flow.json")
 VAN_CHARGING_FILE = data_path("telegram_van_charging.json")
 VAN_KWH_RATE = 0.35
 WEEKLY_REPORT_FILE = data_path("telegram_weekly_report.json")
+WAREHOUSE_HANDOVER_FILE = data_path("telegram_warehouse_handover.json")
 DRIVERS_FILE = data_path("telegram_drivers.json")
+
+# Stała płatność za każde zatwierdzone przekładanie magazynu.
+WAREHOUSE_HANDOVER_RATE = 20.00
+WAREHOUSE_HANDOVER_MIN_BATTERIES = 140
+WAREHOUSE_HANDOVER_ALERT_MINUTES = 4 * 60 + 15  # 4h 15min
 AUDIT_FILE = data_path("telegram_audit_log.json")
-DRIVER_LIMITS_FILE = data_path("telegram_driver_limits.json")
 
 FILE_LOCK = threading.RLock()
 
@@ -106,8 +113,8 @@ FILE_LOCK = threading.RLock()
 ADMIN_IDS = {"6030936882"}
 
 # Ograniczone uprawnienia magazynowe (bez pełnych praw administratora).
-# Michał Pietrzak może wpisywać wyłącznie stany: LIMA/VOI ILOSC oraz LIMA/VOI GOTOWE.
-WAREHOUSE_MANAGER_IDS = {"7247279842"}
+# Obecnie brak dodatkowych magazynierów: tylko ADMIN może ręcznie zmieniać stany LIMA/VOI.
+WAREHOUSE_MANAGER_IDS = set()
 
 # RĘCZNA KSIĄŻKA KIEROWCÓW
 # Tu możesz wpisać kierowców po zebraniu ich Telegram ID.
@@ -201,16 +208,12 @@ BASE_RATE = 2.00
 PENALTY_PER_HOUR = 0.10
 TIME_LIMIT_HOURS = 6
 SMALL_ROUTE_LIMIT_HOURS = 6
-SMALL_ROUTE_MAX_QTY = 60
 MIN_RATE = 1.00
 
 CHARGE_TIME_HOURS = 4.5
 MIN_CHARGE_TIME_HOURS = 3.5
 ALARM_BEFORE_MINUTES = 15
 LOW_READY_LIMIT = 50  # alarm w status_report jest wyłączony
-DRIVER_MAX_BATTERIES = 70
-DRIVER_MIN_BATTERIES = 30
-DRIVER_LIMIT_STEP = 10
 DRIVER_ROUTE_TIME_LIMIT_HOURS = 6
 DEFAULT_CHARGER_SLOTS = 175  # domyślna liczba portów ładowania
 CHARGER_CAPACITY = DEFAULT_CHARGER_SLOTS  # fallback dla starych fragmentów kodu
@@ -348,91 +351,6 @@ def load_db():
 def save_db(db):
     save_json(DB_FILE, db)
 
-
-
-def load_driver_limits():
-    return load_json(DRIVER_LIMITS_FILE, {"drivers": {}})
-
-
-def save_driver_limits(data):
-    save_json(DRIVER_LIMITS_FILE, data)
-
-
-def driver_limit_key(user):
-    return str(user.id)
-
-
-def get_driver_battery_limit(user):
-    data = load_driver_limits()
-    item = data.get("drivers", {}).get(driver_limit_key(user), {})
-    try:
-        limit = int(item.get("limit", DRIVER_MAX_BATTERIES))
-    except Exception:
-        limit = DRIVER_MAX_BATTERIES
-    return max(DRIVER_MIN_BATTERIES, min(DRIVER_MAX_BATTERIES, limit))
-
-
-def set_driver_battery_limit(user, limit, reason="manual"):
-    limit = max(DRIVER_MIN_BATTERIES, min(DRIVER_MAX_BATTERIES, int(limit)))
-    data = load_driver_limits()
-    drivers = data.setdefault("drivers", {})
-    drivers[driver_limit_key(user)] = {
-        "name": get_driver_name(user),
-        "limit": limit,
-        "reason": reason,
-        "updated_at": now().isoformat()
-    }
-    save_driver_limits(data)
-    return limit
-
-
-def update_driver_limit_after_trip(user, was_late):
-    old_limit = get_driver_battery_limit(user)
-
-    if was_late:
-        new_limit = max(DRIVER_MIN_BATTERIES, old_limit - DRIVER_LIMIT_STEP)
-        reason = "late_penalty"
-    else:
-        new_limit = min(DRIVER_MAX_BATTERIES, old_limit + DRIVER_LIMIT_STEP)
-        reason = "on_time_reward"
-
-    set_driver_battery_limit(user, new_limit, reason)
-    return old_limit, new_limit
-
-
-def driver_limit_status_line(user):
-    limit = get_driver_battery_limit(user)
-    if limit >= DRIVER_MAX_BATTERIES:
-        return f"Limit kierowcy: {limit} baterii ✅"
-    return f"Limit kierowcy po karze: {limit} baterii ⚠️"
-
-
-def driver_limit_change_message(user, was_late):
-    old_limit, new_limit = update_driver_limit_after_trip(user, was_late)
-
-    if was_late:
-        if new_limit < old_limit:
-            return (
-                "🚨 KARA LIMITU\n"
-                f"Spóźnienie obniża następny limit: {old_limit} → {new_limit} baterii.\n"
-                f"Minimum kary: {DRIVER_MIN_BATTERIES}. Żeby wracać do maxa {DRIVER_MAX_BATTERIES}, kierowca musi przywozić na czas.\n"
-            )
-        return (
-            "🚨 KARA LIMITU\n"
-            f"Kierowca jest już na minimum: {new_limit} baterii.\n"
-            "Żeby podnieść limit, musi przywieźć następną trasę na czas.\n"
-        )
-
-    if new_limit > old_limit:
-        return (
-            "✅ LIMIT PODNIESIONY\n"
-            f"Trasa na czas: {old_limit} → {new_limit} baterii.\n"
-        )
-
-    return (
-        "✅ LIMIT UTRZYMANY\n"
-        f"Kierowca ma maksymalny limit: {new_limit} baterii.\n"
-    )
 
 
 
@@ -941,6 +859,7 @@ def get_keyboard(user=None, chat=None):
 
     base = [
         ["Pickup", "Return"],
+        ["Przekładanie"],
         ["🟢 OK"],
     ]
 
@@ -2287,6 +2206,83 @@ def handle_driver_flow(text, user, chat_id):
 
     t = normalize_text(text).strip()
 
+    # PRZEKŁADANIE MAGAZYNU — pełny 6-krokowy stan LIMA + VOI.
+    if flow.get("type") == "warehouse_handover":
+        if not can_use_warehouse_handover(user):
+            clear_driver_flow(user.id)
+            return "❌ Brak dostępu do przekładania magazynu."
+
+        if is_cancel_text(t):
+            clear_driver_flow(user.id)
+            return "❌ Przekładanie anulowane. Nic nie zostało dopisane."
+
+        if flow.get("step") == "confirm_warehouse_handover":
+            if is_edit_text(t):
+                clear_driver_flow(user.id)
+                return start_warehouse_handover_flow(user, chat_id)
+            if not is_ok_text(t):
+                return (
+                    "Kliknij 🟢 OK, żeby zapisać, ✏️ Edit żeby wpisać od początku "
+                    "albo 🔴 Cancel żeby anulować."
+                )
+
+            total_inserted = int(flow.get("lima_charging", 0) or 0) + int(flow.get("voi_charging", 0) or 0)
+            full_loads, _ = warehouse_handover_payment(total_inserted)
+            if not full_loads:
+                return (
+                    "❌ TO NIE JEST PEŁNA PRZEKŁADKA\n\n"
+                    f"Włożone łącznie: {total_inserted} baterii.\n"
+                    f"Płatna przekładka musi mieć minimum {WAREHOUSE_HANDOVER_MIN_BATTERIES} baterii. Nie ma górnego limitu.\n\n"
+                    "Nie zapisuję £20 i nie resetuję zegara 4h15.\n"
+                    "Kliknij ✏️ Edit, żeby wpisać poprawne dane, albo 🔴 Cancel."
+                )
+
+            entry = save_warehouse_handover_entry(user, chat_id, flow)
+            clear_driver_flow(user.id)
+            return (
+                "✅ PRZEKŁADANIE ZAPISANE\n\n"
+                f"👤 {entry['worker']}\n"
+                f"🔋 Włożone łącznie: {entry['total_inserted']}\n"
+                "🧰 Przekładanie: 1\n"
+                f"💷 Dopisano: £{entry['earned']:.2f}\n"
+                "📊 Stan LIMA + VOI został zaktualizowany w STATUSIE.\n\n"
+                f"{status_report()}\n\n"
+                "Komenda: raport magazyn — pokazuje sumę tygodnia."
+            )
+
+        qty_value = _warehouse_flow_number(text)
+        if qty_value is None:
+            return "Wpisz liczbę, np. 140, albo wpisz: anuluj"
+        if qty_value < 0:
+            return "Liczba nie może być ujemna."
+
+        step = flow.get("step")
+        prompts = {
+            "lima_charging": ("lima_charging", "lima_ready", "2/6 🟢 LIMA — ile baterii jest GOTOWYCH?"),
+            "lima_ready": ("lima_ready", "lima_waiting", "3/6 🟢 LIMA — ile baterii OCZEKUJE na ładowanie?"),
+            "lima_waiting": ("lima_waiting", "voi_charging", "4/6 🔵 VOI — ile baterii jest WŁOŻONYCH do ładowania?"),
+            "voi_charging": ("voi_charging", "voi_ready", "5/6 🔵 VOI — ile baterii jest GOTOWYCH?"),
+            "voi_ready": ("voi_ready", "voi_waiting", "6/6 🔵 VOI — ile baterii OCZEKUJE na ładowanie?"),
+        }
+
+        if step in prompts:
+            field, next_step, prompt = prompts[step]
+            flow[field] = qty_value
+            flow["step"] = next_step
+            data[key] = flow
+            save_driver_flow(data)
+            return f"✅ Zapisano: {qty_value}\n\n{prompt}"
+
+        if step == "voi_waiting":
+            flow["voi_waiting"] = qty_value
+            flow["step"] = "confirm_warehouse_handover"
+            data[key] = flow
+            save_driver_flow(data)
+            return (_warehouse_handover_confirmation(flow), get_confirm_keyboard())
+
+        clear_driver_flow(user.id)
+        return "⚠️ Przekładanie się zacięło. Wpisz: przekladanie"
+
     # MAGAZYN VOI — wpis gotowych E4/E5 po komendzie VOI GOTOWE.
     if flow.get("type") == "warehouse_voi_ready_types":
         if not can_manage_warehouse(user):
@@ -2398,7 +2394,7 @@ def handle_driver_flow(text, user, chat_id):
         t
     )
     if legacy_inventory_match:
-        if not is_admin(user):
+        if not can_manage_warehouse(user):
             return "❌ Brak dostępu."
         brand_reply = set_brand_inventory_command(text)
     if brand_reply:
@@ -2534,11 +2530,6 @@ def handle_driver_flow(text, user, chat_id):
             charging = int(item.get("charging", 0))
             waiting = int(item.get("waiting", 0))
 
-            try:
-                limit = get_driver_battery_limit(user)
-            except Exception:
-                limit = 70
-
             flow["brand"] = brand
             flow["ready"] = ready
             flow["charging"] = charging
@@ -2578,7 +2569,6 @@ def handle_driver_flow(text, user, chat_id):
                     f"🔋 E4 gotowe: {ready_e4}\n"
                     f"🔋 E5 gotowe: {ready_e5}\n"
                     f"⏳ Oczekujące: {waiting}\n"
-                    f"🚦 Twój limit: {limit}\n"
                     f"{target_line}\n"
                     "1/2 Ile baterii E4 pobierasz?"
                 )
@@ -2600,7 +2590,6 @@ def handle_driver_flow(text, user, chat_id):
                 f"🚗 PICKUP — {brand_label(brand).upper()}\n\n"
                 f"📦 Gotowe: {ready}\n"
                 f"⏳ Oczekujące: {waiting}\n\n"
-                f"🚦 Twój limit: {limit}\n"
                 + (f"🚗 Chcesz zabrać: {pending_qty}\n\nWpisz tę liczbę jeszcze raz albo wpisz inną." if pending_qty else "\nIle baterii zabierasz?")
             )
 
@@ -2631,17 +2620,6 @@ def handle_driver_flow(text, user, chat_id):
                     f"Wpisałeś wcześniej pickup {pending_qty}.\n"
                     f"E4 ({e4_qty}) + E5 ({e5_qty}) = {total_qty}.\n\n"
                     f"Wpisz ponownie liczbę E5, aby suma wyniosła {pending_qty}, albo wpisz: anuluj"
-                )
-
-            try:
-                limit = get_driver_battery_limit(user)
-            except Exception:
-                limit = 70
-
-            if total_qty > limit:
-                return (
-                    f"❌ Nie możesz zabrać {total_qty} baterii.\n\n"
-                    f"Twój aktualny limit: {limit}."
                 )
 
             inv = load_inventory()
@@ -2747,11 +2725,6 @@ def handle_driver_flow(text, user, chat_id):
 
             start_time = now()
             deadline = start_time + timedelta(hours=trip_time_limit_hours(total_qty))
-            try:
-                limit_at_start = get_driver_battery_limit(user)
-            except Exception:
-                limit_at_start = 70
-
             db["trips"].append({
                 "driver": get_driver_name(user),
                 "user_id": str(user.id),
@@ -2762,7 +2735,6 @@ def handle_driver_flow(text, user, chat_id):
                 "battery_types": {"E4": e4_qty, "E5": e5_qty},
                 "e4_qty": e4_qty,
                 "e5_qty": e5_qty,
-                "limit_at_start": limit_at_start,
                 "time_limit_hours": trip_time_limit_hours(total_qty),
                 "end": None,
                 "alert_sent": False
@@ -2799,17 +2771,6 @@ def handle_driver_flow(text, user, chat_id):
         if flow["step"] == "take_qty":
             if qty < 1:
                 return "🚨 Minimum to 1 bateria."
-
-            try:
-                limit = get_driver_battery_limit(user)
-            except Exception:
-                limit = 70
-
-            if qty > limit:
-                return (
-                    f"❌ Nie możesz zabrać {qty} baterii.\n\n"
-                    f"Twój aktualny limit: {limit}."
-                )
 
             inv = load_inventory()
             brand = flow.get("brand", "lima")
@@ -2892,7 +2853,6 @@ def handle_driver_flow(text, user, chat_id):
                 "start": start_time.isoformat(),
                 "qty": qty_take,
                 "company": brand,
-                "limit_at_start": flow.get("limit_at_start"),
                 "time_limit_hours": trip_time_limit_hours(qty_take),
                 "end": None,
                 "alert_sent": False
@@ -3023,15 +2983,6 @@ def handle_driver_flow(text, user, chat_id):
             if qty_take < 1:
                 return "🚨 Nie można zabrać 0. Minimum to 1."
 
-            driver_limit = get_driver_battery_limit(user)
-            if qty_take > driver_limit:
-                return (
-                    f"❌ Nie możesz zabrać {qty_take} baterii.\n\n"
-                    f"{driver_limit_status_line(user)}\n"
-                    f"Max systemu: {DRIVER_MAX_BATTERIES}, minimum po karach: {DRIVER_MIN_BATTERIES}.\n"
-                    "Przywieź trasę na czas, żeby podnieść limit."
-                )
-
             inv = load_inventory()
             ready = int(inv.get("ready", 0))
             if qty_take > ready:
@@ -3052,7 +3003,6 @@ def handle_driver_flow(text, user, chat_id):
                 "chat_id": chat_id,
                 "start": start_time.isoformat(),
                 "qty": qty_take,
-                "limit_at_start": driver_limit,
                 "time_limit_hours": DRIVER_ROUTE_TIME_LIMIT_HOURS,
                 "end": None,
                 "alert_sent": False
@@ -3068,7 +3018,6 @@ def handle_driver_flow(text, user, chat_id):
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty_take}\n"
                 f"Limit czasu: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
-                f"Limit baterii kierowcy: {driver_limit}\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -3076,15 +3025,6 @@ def handle_driver_flow(text, user, chat_id):
         if flow["step"] == "take_qty":
             if qty < 1:
                 return "🚨 Nie można zabrać 0. Minimum to 1."
-
-            driver_limit = get_driver_battery_limit(user)
-            if qty > driver_limit:
-                return (
-                    f"❌ Nie możesz zabrać {qty} baterii.\n\n"
-                    f"{driver_limit_status_line(user)}\n"
-                    f"Max systemu: {DRIVER_MAX_BATTERIES}, minimum po karach: {DRIVER_MIN_BATTERIES}.\n"
-                    "Przywieź trasę na czas, żeby podnieść limit."
-                )
 
             inv = load_inventory()
             ready = int(inv.get("ready", 0))
@@ -3106,7 +3046,6 @@ def handle_driver_flow(text, user, chat_id):
                 "chat_id": chat_id,
                 "start": start_time.isoformat(),
                 "qty": qty,
-                "limit_at_start": driver_limit,
                 "time_limit_hours": DRIVER_ROUTE_TIME_LIMIT_HOURS,
                 "end": None,
                 "alert_sent": False
@@ -3122,7 +3061,6 @@ def handle_driver_flow(text, user, chat_id):
                 f"Start: {start_time.strftime('%H:%M')}\n"
                 f"Pobrane: {qty}\n"
                 f"Limit czasu: {DRIVER_ROUTE_TIME_LIMIT_HOURS}h\n"
-                f"Limit baterii kierowcy: {driver_limit}\n"
                 f"Deadline: {deadline.strftime('%H:%M')}\n\n"
                 f"{status_report()}"
             )
@@ -3475,9 +3413,6 @@ def handle_driver_flow(text, user, chat_id):
 
             auto_moved_to_charging = 0
 
-            was_late = late_hours > 0
-            limit_change_line = driver_limit_change_message(user, was_late)
-
             clear_driver_flow(user.id)
 
             state = "OK ✅" if late_hours <= 0 else f"SPÓŹNIONY ❌ ({fmt_hours(late_hours)})"
@@ -3504,7 +3439,6 @@ def handle_driver_flow(text, user, chat_id):
                 
                 f"Czas: {fmt_hours(hours)}\n"
                 f"Status: {state}\n"
-                f"{limit_change_line}\n"
                 f"{status_report()}"
             )
 
@@ -4726,6 +4660,10 @@ def help_text():
         "Gotowe → liczba\n"
         "Ładowarka → liczba\n"
         "Oczekują → liczba\n\n"
+        "🔄 PRZEKŁADANIE MAGAZYNU:\n"
+        "przekladanie — uruchamia 6 kroków: LIMA włożone/gotowe/oczekuje + VOI włożone/gotowe/oczekuje\n"
+        f"Każde zatwierdzone przekładanie = £{WAREHOUSE_HANDOVER_RATE:.2f}\n"
+        "Po zatwierdzeniu bot aktualizuje stan LIMA + VOI w STATUSIE.\n\n"
         "👑 ADMIN — tylko admin:\n"
         "Depo → liczba\n"
         "aktualizacja depo 505 gotowe 197 oczekuje 114 ladowarki 133\n"
@@ -4743,6 +4681,8 @@ def help_text():
         "raport Jan Kowalski\n"
         "raport dzis Jan Kowalski\n"
         "raport tydzien Jan Kowalski\n"
+        "raport magazyn / raport magazyn poprzedni tydzien\n"
+        "rozliczenie / rozliczenie poprzedni tydzien\n"
         "Raport tygodniowy firmy idzie automatycznie w poniedziałek o 06:00.\n"
     )
 
@@ -4855,13 +4795,14 @@ def set_voi_ready_types(e4, e5):
     voi["ready_e5"] = e5
     voi["ready"] = e4 + e5
     voi["ready_types_configured"] = True
-    voi["charging"] = 0
-    voi["waiting"] = max(
-        0,
-        int(voi.get("total", 0) or 0)
-        - int(voi.get("ready", 0) or 0)
-        - active_in_transit_by_company("voi"),
-    )
+    if not voi.get("warehouse_snapshot_at"):
+        voi["charging"] = 0
+        voi["waiting"] = max(
+            0,
+            int(voi.get("total", 0) or 0)
+            - int(voi.get("ready", 0) or 0)
+            - active_in_transit_by_company("voi"),
+        )
     save_company_inventory(inv)
     return e4, e5, e4 + e5
 
@@ -5317,6 +5258,42 @@ def previous_week_bounds(reference=None):
     return start, end
 
 
+def previous_month_bounds(reference=None):
+    current = reference or now()
+    first_this_month = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = first_this_month - timedelta(microseconds=1)
+    start = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start, end
+
+
+def previous_year_bounds(reference=None):
+    current = reference or now()
+    start = current.replace(year=current.year - 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = current.replace(year=current.year, month=1, day=1, hour=0, minute=0, second=0, microsecond=0) - timedelta(microseconds=1)
+    return start, end
+
+
+def month_bounds(year, month):
+    year = int(year)
+    month = int(month)
+    if month < 1 or month > 12:
+        raise ValueError("month out of range")
+    start = now().replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month == 12:
+        next_month = start.replace(year=year + 1, month=1)
+    else:
+        next_month = start.replace(month=month + 1)
+    end = next_month - timedelta(microseconds=1)
+    return start, end
+
+
+def year_bounds(year):
+    year = int(year)
+    start = now().replace(year=year, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(year=year + 1) - timedelta(microseconds=1)
+    return start, end
+
+
 def van_summary_between(start_dt, end_dt):
     totals = {}
     total_kwh = 0.0
@@ -5350,10 +5327,9 @@ def van_summary_between(start_dt, end_dt):
     }
 
 
-def previous_week_statistics_text():
-    start_dt, end_dt = previous_week_bounds()
+def historical_statistics_text(start_dt, end_dt, heading):
     lines = [
-        "📊 STATYSTYKI — POPRZEDNI TYDZIEŃ",
+        heading,
         f"Okres: {start_dt.strftime('%d/%m/%Y %H:%M')} – {end_dt.strftime('%d/%m/%Y %H:%M')}",
         "",
     ]
@@ -5396,13 +5372,514 @@ def previous_week_statistics_text():
                 f"  - {name}: {item['kwh']:.3f} kWh / £{item['cost']:.2f} / {item['count']} wpisów"
             )
 
+    warehouse = warehouse_handover_summary_between(start_dt, end_dt)
+    lines += [
+        "",
+        "🧰 MAGAZYN — PRZEKŁADANIE",
+        f"• Wpisy: {warehouse['entries']}",
+        f"• Przekładania: {warehouse['entries']}",
+        f"• Do wypłaty: £{warehouse['earned']:.2f}",
+    ]
+    if warehouse["workers"]:
+        lines.append("• Magazynierzy:")
+        for name, item in sorted(warehouse["workers"].items(), key=lambda x: x[1]["earned"], reverse=True):
+            lines.append(
+                f"  - {name}: {item['entries']} × £{WAREHOUSE_HANDOVER_RATE:.2f} = £{item['earned']:.2f}"
+            )
+
     return "\n".join(lines).rstrip()
 
 
+def previous_week_statistics_text():
+    start_dt, end_dt = previous_week_bounds()
+    return historical_statistics_text(start_dt, end_dt, "📊 STATYSTYKI — POPRZEDNI TYDZIEŃ")
+
+
+def previous_month_statistics_text():
+    start_dt, end_dt = previous_month_bounds()
+    return historical_statistics_text(start_dt, end_dt, "📊 STATYSTYKI — POPRZEDNI MIESIĄC")
+
+
+def previous_year_statistics_text():
+    start_dt, end_dt = previous_year_bounds()
+    return historical_statistics_text(start_dt, end_dt, "📊 STATYSTYKI — POPRZEDNI ROK")
+
+
+def statistics_help_text():
+    return (
+        "📊 HISTORIA STATYSTYK\n\n"
+        "Dostępne komendy:\n"
+        "• statystyki poprzedni tydzien\n"
+        "• statystyki poprzedni miesiac\n"
+        "• statystyki poprzedni rok\n"
+        "• statystyki miesiac 2026-07\n"
+        "• statystyki rok 2026"
+    )
+
+
+
+# ============================
+# WAREHOUSE HANDOVER + WEEKLY SETTLEMENT
+# Osobny moduł kontroli fizycznego stanu ładowarek.
+# Nie zmienia logiki Pickup/Return ani VOI E4/E5.
+# ============================
+
+def load_warehouse_handovers():
+    return load_json(WAREHOUSE_HANDOVER_FILE, {"entries": []})
+
+
+def save_warehouse_handovers(data):
+    save_json(WAREHOUSE_HANDOVER_FILE, data)
+
+
+def can_use_warehouse_handover(user):
+    """Przekładkę może zapisać admin, magazynier albo kierowca z książki ID."""
+    if not user:
+        return False
+    if is_admin(user) or can_manage_warehouse(user):
+        return True
+    _, item = get_driver_from_book_by_user_id(user.id)
+    return item is not None
+
+
+def warehouse_handover_payment(total_inserted=None):
+    """£20 za przekładkę od 140 baterii wzwyż, łącznie LIMA + VOI; bez górnego limitu."""
+    try:
+        total_inserted = int(total_inserted or 0)
+    except Exception:
+        total_inserted = 0
+    if total_inserted >= WAREHOUSE_HANDOVER_MIN_BATTERIES:
+        return 1, round(WAREHOUSE_HANDOVER_RATE, 2)
+    return 0, 0.0
+
+
+def start_warehouse_handover_flow(user, chat_id):
+    if not can_use_warehouse_handover(user):
+        return (
+            "❌ Nie masz dostępu do przekładania magazynu.\n\n"
+            "Administrator musi najpierw dodać Twoje Telegram ID do listy kierowców."
+        )
+
+    data = load_driver_flow()
+    data[str(user.id)] = {
+        "type": "warehouse_handover",
+        "step": "lima_charging",
+        "chat_id": chat_id,
+        "driver": get_driver_name(user),
+        "created_at": now().isoformat(),
+        "lima_charging": None,
+        "lima_ready": None,
+        "lima_waiting": None,
+        "voi_charging": None,
+        "voi_ready": None,
+        "voi_waiting": None,
+    }
+    save_driver_flow(data)
+
+    return (
+        "🔄 PRZEKŁADANIE MAGAZYNU — START\n\n"
+        f"👤 {get_driver_name(user)}\n"
+        f"Płatna przekładka: od {WAREHOUSE_HANDOVER_MIN_BATTERIES} baterii wzwyż łącznie LIMA + VOI — bez górnego limitu.\n"
+        f"Tylko pełna przekładka = £{WAREHOUSE_HANDOVER_RATE:.2f}.\n\n"
+        "1/6 🟢 LIMA — ile baterii jest WŁOŻONYCH do ładowania?\n"
+        "Wpisz samą liczbę, np. 140."
+    )
+
+
+def _warehouse_flow_number(text):
+    qty = number_from_text(text)
+    if qty is None:
+        return None
+    return int(qty)
+
+
+def _warehouse_handover_confirmation(flow):
+    lima_charging = int(flow.get("lima_charging", 0) or 0)
+    lima_ready = int(flow.get("lima_ready", 0) or 0)
+    lima_waiting = int(flow.get("lima_waiting", 0) or 0)
+    voi_charging = int(flow.get("voi_charging", 0) or 0)
+    voi_ready = int(flow.get("voi_ready", 0) or 0)
+    voi_waiting = int(flow.get("voi_waiting", 0) or 0)
+    total_inserted = lima_charging + voi_charging
+    full_loads, earned = warehouse_handover_payment(total_inserted)
+
+    return (
+        "🔄 PRZEKŁADANIE — SPRAWDŹ DANE\n\n"
+        "🟢 LIMA\n"
+        f"🔌 Włożone: {lima_charging}\n"
+        f"✅ Gotowe: {lima_ready}\n"
+        f"⏳ Oczekuje: {lima_waiting}\n\n"
+        "🔵 VOI\n"
+        f"🔌 Włożone: {voi_charging}\n"
+        f"✅ Gotowe: {voi_ready}\n"
+        f"⏳ Oczekuje: {voi_waiting}\n\n"
+        f"🔋 Włożone łącznie: {total_inserted}\n"
+        f"🧰 Pełna przekładka: {'TAK ✅' if full_loads else 'NIE ❌'}\n"
+        f"💷 Do dopisania: £{earned:.2f}\n"
+        f"⚠️ Warunek wypłaty: minimum {WAREHOUSE_HANDOVER_MIN_BATTERIES} baterii łącznie; bez górnego limitu.\n"
+        "📊 Po zatwierdzeniu stan LIMA + VOI zostanie od razu zaktualizowany w STATUSIE.\n\n"
+        "Kliknij 🟢 OK, żeby zapisać.\n"
+        "✏️ Edit — zacznij wpis od początku.\n"
+        "🔴 Cancel — anuluj."
+    )
+
+
+def apply_warehouse_handover_snapshot(lima, voi):
+    """
+    Ustawia stan fizyczny magazynu z przekładania jako aktualny stan Telegrama.
+    Źródłem prawdy dla obecnego STATUSU jest inv["companies"].
+    Dodatkowo synchronizujemy stare inv["brands"] i pola zbiorcze dla zgodności
+    ze starszymi fragmentami bota. Pole total/ilość nie jest zmieniane, bo kreator
+    przekładania nie pyta o całkowitą liczbę baterii.
+    """
+    inv = load_company_inventory()
+    companies = inv.setdefault("companies", {})
+    brands = inv.setdefault("brands", {})
+
+    for key, snapshot in (("lima", lima), ("voi", voi)):
+        company = companies.setdefault(key, {"total": 0, "ready": 0, "charging": 0, "waiting": 0})
+        company["charging"] = max(0, int(snapshot.get("charging", 0) or 0))
+        company["ready"] = max(0, int(snapshot.get("ready", 0) or 0))
+        company["waiting"] = max(0, int(snapshot.get("waiting", 0) or 0))
+        company["warehouse_snapshot_at"] = now().isoformat()
+
+        # VOI może mieć dodatkowy podział GOTOWE na E4/E5.
+        # Nie wymyślamy tego podziału podczas przekładania. Jeśli stary podział
+        # nie pasuje do nowego GOTOWE, oznaczamy go jako niepełny zamiast
+        # fałszować liczbę całkowitą.
+        if key == "voi":
+            e4 = max(0, int(company.get("ready_e4", 0) or 0))
+            e5 = max(0, int(company.get("ready_e5", 0) or 0))
+            if e4 + e5 > company["ready"]:
+                company["ready_e4"] = 0
+                company["ready_e5"] = 0
+                company["ready_types_configured"] = False
+            else:
+                company["ready_types_configured"] = bool(e4 + e5 == company["ready"])
+
+        brand = brands.setdefault(key, {"total": int(company.get("total", 0) or 0), "ready": 0, "charging": 0, "waiting": 0})
+        brand["charging"] = company["charging"]
+        brand["ready"] = company["ready"]
+        brand["waiting"] = company["waiting"]
+        if not int(brand.get("total", 0) or 0) and int(company.get("total", 0) or 0):
+            brand["total"] = int(company.get("total", 0) or 0)
+
+    inv["ready"] = sum(int(companies[k].get("ready", 0) or 0) for k in ("lima", "voi"))
+    inv["charging"] = sum(int(companies[k].get("charging", 0) or 0) for k in ("lima", "voi"))
+    inv["waiting"] = sum(int(companies[k].get("waiting", 0) or 0) for k in ("lima", "voi"))
+    inv["updated_at"] = now().isoformat()
+    save_company_inventory(inv)
+    return inv
+
+
+def save_warehouse_handover_entry(user, chat_id, flow):
+    data = load_warehouse_handovers()
+    entries = data.setdefault("entries", [])
+
+    lima = {
+        "charging": int(flow.get("lima_charging", 0) or 0),
+        "ready": int(flow.get("lima_ready", 0) or 0),
+        "waiting": int(flow.get("lima_waiting", 0) or 0),
+    }
+    voi = {
+        "charging": int(flow.get("voi_charging", 0) or 0),
+        "ready": int(flow.get("voi_ready", 0) or 0),
+        "waiting": int(flow.get("voi_waiting", 0) or 0),
+    }
+    total_inserted = lima["charging"] + voi["charging"]
+    full_loads, earned = warehouse_handover_payment(total_inserted)
+
+    entry = {
+        "id": (entries[-1].get("id", 0) + 1) if entries else 1,
+        "created_at": now().isoformat(),
+        "worker": get_driver_name(user),
+        "user_id": str(user.id),
+        "chat_id": chat_id,
+        "lima": lima,
+        "voi": voi,
+        "total_inserted": total_inserted,
+        "full_loads": full_loads,
+        "rate": WAREHOUSE_HANDOVER_RATE,
+        "earned": earned,
+    }
+    entries.append(entry)
+    data["entries"] = entries[-5000:]
+    save_warehouse_handovers(data)
+
+    # Najważniejsze: przekładanie jest jednocześnie aktualizacją bieżącego
+    # stanu baterii pokazywanego przez STATUS na Telegramie.
+    apply_warehouse_handover_snapshot(lima, voi)
+
+    audit_log(
+        "warehouse_handover_completed",
+        user=user,
+        chat_id=chat_id,
+        details={
+            "entry_id": entry["id"],
+            "total_inserted": total_inserted,
+            "full_loads": full_loads,
+            "earned": earned,
+            "lima": lima,
+            "voi": voi,
+        },
+    )
+    return entry
+
+
+def warehouse_latest_snapshot_text():
+    entries = load_warehouse_handovers().get("entries", [])
+    if not entries:
+        return ""
+    e = entries[-1]
+    lima = e.get("lima", {})
+    voi = e.get("voi", {})
+    try:
+        created = datetime.fromisoformat(e.get("created_at"))
+        when = created.astimezone(TZ).strftime("%d/%m %H:%M")
+    except Exception:
+        when = str(e.get("created_at", ""))
+
+    return (
+        "🧾 OSTATNIE PRZEKŁADANIE\n"
+        f"👤 {e.get('worker', 'Nieznany')} — {when}\n"
+        f"🟢 LIMA: włożone {int(lima.get('charging', 0) or 0)} | gotowe {int(lima.get('ready', 0) or 0)} | oczekuje {int(lima.get('waiting', 0) or 0)}\n"
+        f"🔵 VOI: włożone {int(voi.get('charging', 0) or 0)} | gotowe {int(voi.get('ready', 0) or 0)} | oczekuje {int(voi.get('waiting', 0) or 0)}"
+    )
+
+
+def warehouse_handover_summary_between(start_dt, end_dt):
+    workers = {}
+    total_entries = 0
+    total_inserted = 0
+    total_full_loads = 0
+    total_earned = 0.0
+
+    for entry in load_warehouse_handovers().get("entries", []):
+        try:
+            created = datetime.fromisoformat(entry.get("created_at"))
+        except Exception:
+            continue
+        if not (start_dt <= created <= end_dt):
+            continue
+
+        name = display_driver_name(entry.get("worker", "Nieznany"))
+        inserted = int(entry.get("total_inserted", 0) or 0)
+        full_loads, earned = warehouse_handover_payment(inserted)
+        if not full_loads:
+            continue
+
+        item = workers.setdefault(name, {"entries": 0, "inserted": 0, "full_loads": 0, "earned": 0.0})
+        item["entries"] += 1
+        item["inserted"] += inserted
+        item["full_loads"] += 1
+        item["earned"] += earned
+
+        total_entries += 1
+        total_inserted += inserted
+        total_full_loads += 1
+        total_earned += earned
+
+    return {
+        "entries": total_entries,
+        "inserted": total_inserted,
+        "full_loads": total_full_loads,
+        "earned": total_earned,
+        "workers": workers,
+    }
+
+
+def warehouse_report_text(start_dt=None, end_dt=None, heading="🧰 MAGAZYN — BIEŻĄCY TYDZIEŃ"):
+    if start_dt is None:
+        start_dt, _ = period_start("tydzien")
+    if end_dt is None:
+        end_dt = now()
+
+    summary = warehouse_handover_summary_between(start_dt, end_dt)
+    lines = [
+        heading,
+        f"Okres: {start_dt.strftime('%d/%m/%Y %H:%M')} – {end_dt.strftime('%d/%m/%Y %H:%M')}",
+        "",
+        f"• Wpisy przekładania: {summary['entries']}",
+        f"• Włożone łącznie: {summary['inserted']}",
+        f"• Przekładania: {summary['entries']}",
+        f"• Do wypłaty magazyn: £{summary['earned']:.2f}",
+    ]
+    if summary["workers"]:
+        lines += ["", "👷 Magazyn:"]
+        for name, item in sorted(summary["workers"].items(), key=lambda x: x[1]["earned"], reverse=True):
+            lines.append(
+                f"• {name}: {item['entries']} × £{WAREHOUSE_HANDOVER_RATE:.2f} = £{item['earned']:.2f}"
+            )
+    else:
+        lines += ["", "Brak zapisanych przekładek w tym okresie."]
+    return "\n".join(lines)
+
+
+def driver_earnings_between(start_dt, end_dt):
+    totals = {}
+    for trip in load_db().get("trips", []):
+        end_iso = trip.get("end")
+        if not end_iso:
+            continue
+        try:
+            ended = datetime.fromisoformat(end_iso)
+        except Exception:
+            continue
+        if not (start_dt <= ended <= end_dt):
+            continue
+        name = display_driver_name(trip.get("driver", "Nieznany"))
+        item = totals.setdefault(name, {"earned": 0.0, "batteries": 0, "trips": 0})
+        item["earned"] += float(trip.get("earned", 0) or 0)
+        item["batteries"] += trip_work_qty(trip)
+        item["trips"] += 1
+    return totals
+
+
+def weekly_settlement_text(start_dt=None, end_dt=None, heading="💷 ROZLICZENIE — BIEŻĄCY TYDZIEŃ"):
+    if start_dt is None:
+        start_dt, _ = period_start("tydzien")
+    if end_dt is None:
+        end_dt = now()
+
+    drivers = driver_earnings_between(start_dt, end_dt)
+    vans = van_summary_between(start_dt, end_dt)
+    warehouse = warehouse_handover_summary_between(start_dt, end_dt)
+
+    names = set(drivers) | set(vans.get("drivers", {})) | set(warehouse.get("workers", {}))
+    lines = [
+        heading,
+        f"Okres: {start_dt.strftime('%d/%m/%Y %H:%M')} – {end_dt.strftime('%d/%m/%Y %H:%M')}",
+        "",
+        "Zasada: praca kierowcy + magazyn − ładowanie vana.",
+        "",
+    ]
+
+    if not names:
+        lines.append("Brak danych do rozliczenia.")
+        return "\n".join(lines)
+
+    grand_driver = grand_warehouse = grand_van = grand_net = 0.0
+    for name in sorted(names, key=normalize_text):
+        d = drivers.get(name, {})
+        w = warehouse.get("workers", {}).get(name, {})
+        v = vans.get("drivers", {}).get(name, {})
+        driver_pay = float(d.get("earned", 0) or 0)
+        warehouse_pay = float(w.get("earned", 0) or 0)
+        van_cost = float(v.get("cost", 0) or 0)
+        net = driver_pay + warehouse_pay - van_cost
+
+        grand_driver += driver_pay
+        grand_warehouse += warehouse_pay
+        grand_van += van_cost
+        grand_net += net
+
+        lines += [
+            f"👤 {name}",
+            f"🚗 Kierowca: £{driver_pay:.2f}",
+            f"🧰 Magazyn: +£{warehouse_pay:.2f}",
+            f"🔌 Ładowanie vana: -£{van_cost:.2f}",
+            f"💰 Do rozliczenia: £{net:.2f}",
+            "",
+        ]
+
+    lines += [
+        "━━━━━━━━━━",
+        f"🚗 Kierowcy razem: £{grand_driver:.2f}",
+        f"🧰 Magazyn razem: £{grand_warehouse:.2f}",
+        f"🔌 Ładowanie vanów razem: £{grand_van:.2f}",
+        f"💷 NETTO DO ROZLICZENIA: £{grand_net:.2f}",
+    ]
+    return "\n".join(lines)
 
 
 def handle_command(text, user, chat_id):
     t = normalize_text(text).strip()
+
+    # VERSION MARKER — pozwala sprawdzić, czy Railway uruchomił właściwy plik.
+    if t in ["wersja", "version", "bot wersja", "wersja bota"]:
+        return "✅ WERSJA BOT: 06-09-2026 HANDOVER-140PLUS+ALERT-4H15"
+
+    # Aktywne przekładanie ma pierwszeństwo przed starymi komendami magazynu.
+    active_flow = load_driver_flow().get(str(user.id), {})
+    if active_flow.get("type") == "warehouse_handover":
+        return handle_driver_flow(text, user, chat_id)
+
+    if t in [
+        "przekladanie", "przekładanie", "start przekladanie", "start przekładanie",
+        "magazyn start", "start magazyn", "przekladanie start", "przekładanie start"
+    ]:
+        return start_warehouse_handover_flow(user, chat_id)
+
+    if t in ["test alert przekladka", "test alert przekładka", "test przekladka alert", "test przekładka alert"]:
+        if not is_admin(user):
+            return "❌ Test alertu jest tylko dla administratora."
+        group_id = load_group().get("chat_id") or chat_id
+        return {
+            "send_to": group_id,
+            "text": warehouse_handover_alert_text(),
+            "confirm": "✅ Testowy alert przekładki wysłany."
+        }
+
+    if t in ["zegar przekladki", "zegar przekładki", "czas przekladki", "czas przekładki"]:
+        if not is_admin(user):
+            return "❌ Zegar przekładki jest tylko dla administratora."
+        data = load_warehouse_handovers()
+        entries = data.get("entries", [])
+        state = data.get("alert_state", {})
+        latest = None
+        for entry in reversed(entries):
+            inserted = int(entry.get("total_inserted", 0) or 0)
+            full_loads, _ = warehouse_handover_payment(inserted)
+            if full_loads:
+                latest = _parse_iso_dt(entry.get("created_at"))
+                if latest:
+                    break
+        last_alert = _parse_iso_dt(state.get("last_alert_at"))
+        anchor = _parse_iso_dt(state.get("anchor_at"))
+        candidates = [dt for dt in (latest, last_alert, anchor) if dt is not None]
+        if not candidates:
+            return "⏱️ Zegar przekładki jeszcze nie wystartował. Po restarcie bota wystartuje automatycznie."
+        base = max(candidates)
+        due = base + timedelta(minutes=WAREHOUSE_HANDOVER_ALERT_MINUTES)
+        left = max(0, int((due - now()).total_seconds() // 60))
+        return (
+            "⏱️ ZEGAR PRZEKŁADKI\n\n"
+            f"Ostatni punkt odniesienia: {base.strftime('%d/%m %H:%M')}\n"
+            f"Następny alert: {due.strftime('%d/%m %H:%M')}\n"
+            f"Pozostało około: {left // 60}h {left % 60}min"
+        )
+
+    if t in ["raport magazyn", "magazyn raport", "magazyn tydzien", "magazyn tydzień"]:
+        if not is_admin(user):
+            return "❌ Raport magazynu jest tylko dla administratora."
+        return warehouse_report_text()
+
+    if t in [
+        "raport magazyn poprzedni tydzien", "raport magazyn poprzedni tydzień",
+        "magazyn poprzedni tydzien", "magazyn poprzedni tydzień"
+    ]:
+        if not is_admin(user):
+            return "❌ Raport magazynu jest tylko dla administratora."
+        start_dt, end_dt = previous_week_bounds()
+        return warehouse_report_text(start_dt, end_dt, "🧰 MAGAZYN — POPRZEDNI TYDZIEŃ")
+
+    if t in ["rozliczenie", "rozliczenie tydzien", "rozliczenie tydzień", "rozliczenie tygodnia"]:
+        if not is_admin(user):
+            return "❌ Rozliczenie jest tylko dla administratora."
+        return weekly_settlement_text()
+
+    if t in ["rozliczenie poprzedni tydzien", "rozliczenie poprzedni tydzień", "rozliczenie zeszly tydzien", "rozliczenie zeszły tydzień"]:
+        if not is_admin(user):
+            return "❌ Rozliczenie jest tylko dla administratora."
+        start_dt, end_dt = previous_week_bounds()
+        return weekly_settlement_text(start_dt, end_dt, "💷 ROZLICZENIE — POPRZEDNI TYDZIEŃ")
+
+    # EARLY WAREHOUSE ACCESS FIX — magazynierzy (Michał/Luke) mają dostęp
+    # do LIMA/VOI ILOSC i GOTOWE zanim starsze reguły admina przechwycą komendę.
+    if re.match(r"^(lima|lim|lime|voi|woi|voy|v)\s+(ilosc|ilość|gotowe)\b", t):
+        warehouse_reply = handle_two_warehouse_manual_command(text, user, chat_id)
+        if warehouse_reply is not None:
+            return warehouse_reply
 
     # VAN_CHARGING_COMMANDS
     if t in ["van", "/van"]:
@@ -5441,6 +5918,54 @@ def handle_command(text, user, chat_id):
         if not is_admin(user):
             return "❌ Brak dostępu."
         return previous_week_statistics_text()
+
+
+    if t in [
+        "raport poprzedni miesiac",
+        "raport zeszly miesiac",
+        "statystyki poprzedni miesiac",
+        "statystyki zeszly miesiac",
+        "/statystykimiesiac",
+    ]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return previous_month_statistics_text()
+
+    if t in [
+        "raport poprzedni rok",
+        "raport zeszly rok",
+        "statystyki poprzedni rok",
+        "statystyki zeszly rok",
+        "/statystykirok",
+    ]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return previous_year_statistics_text()
+
+    if t in ["statystyki", "historia statystyk", "statystyki historia"]:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        return statistics_help_text()
+
+    match_month_stats = re.fullmatch(r"statystyki\s+miesiac\s+(\d{4})[-/.](\d{1,2})", t)
+    if match_month_stats:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        try:
+            start_dt, end_dt = month_bounds(match_month_stats.group(1), match_month_stats.group(2))
+        except ValueError:
+            return "❌ Nieprawidłowy miesiąc. Użyj np.: statystyki miesiac 2026-07"
+        return historical_statistics_text(
+            start_dt, end_dt,
+            f"📊 STATYSTYKI — {start_dt.strftime('%m/%Y')}"
+        )
+
+    match_year_stats = re.fullmatch(r"statystyki\s+rok\s+(\d{4})", t)
+    if match_year_stats:
+        if not is_admin(user):
+            return "❌ Brak dostępu."
+        start_dt, end_dt = year_bounds(match_year_stats.group(1))
+        return historical_statistics_text(start_dt, end_dt, f"📊 STATYSTYKI — ROK {start_dt.year}")
 
     if t in ["pamiec", "pamięć", "stan pamieci", "stan pamięci"]:
         if not is_admin(user):
@@ -5545,7 +6070,7 @@ def handle_command(text, user, chat_id):
         t
     )
     if legacy_inventory_match:
-        if not is_admin(user):
+        if not can_manage_warehouse(user):
             return "❌ Brak dostępu."
         brand_reply = set_brand_inventory_command(text)
     if brand_reply:
@@ -6130,6 +6655,145 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply, reply_markup=keyboard)
 
 
+# ============================
+# AUTOMATYCZNY ALERT PRZEKŁADKI — co 4h15
+# Zegar resetuje się po prawidłowej płatnej przekładce (minimum 140 baterii, bez górnego limitu).
+# Jeśli nikt nie wykona przekładki, alert powtarza się co 4h15.
+# ============================
+
+def _parse_iso_dt(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return dt.astimezone(TZ)
+    except Exception:
+        return None
+
+
+def known_driver_private_chat_ids():
+    """Unikalne Telegram ID zapisanych kierowców. Prywatna wysyłka może się nie udać,
+    jeśli użytkownik nigdy nie uruchomił bota — dlatego grupa zawsze jest głównym kanałem."""
+    ids = set()
+    for item in DRIVER_ID_BOOK.values():
+        uid = str(item.get("id", "")).strip()
+        if uid.isdigit():
+            ids.add(int(uid))
+    try:
+        for item in load_drivers().values():
+            uid = str(item.get("id", "")).strip()
+            if uid.isdigit():
+                ids.add(int(uid))
+    except Exception:
+        pass
+    return sorted(ids)
+
+
+def warehouse_handover_alert_text():
+    return (
+        "🚨🔄 CZAS NA PRZEKŁADKĘ MAGAZYNU 🔄🚨\n\n"
+        "Minęło 4 godziny 15 minut od ostatniej pełnej przekładki / ostatniego alertu.\n\n"
+        "Proszę sprawdzić pełne ładowarki LIMA oraz VOI i zrobić przekładkę, jeśli jest gotowa.\n"
+        f"💷 Przekładka od {WAREHOUSE_HANDOVER_MIN_BATTERIES} baterii wzwyż = £{WAREHOUSE_HANDOVER_RATE:.0f} — bez górnego limitu.\n"
+        "🔵 £20 obejmuje również sprawdzenie i przełożenie VOI, jeśli jest taka potrzeba.\n\n"
+        "Po wykonaniu wpisz w bocie: PRZEKŁADANIE"
+    )
+
+
+async def warehouse_handover_alert_tick(app: Application):
+    data = load_warehouse_handovers()
+    entries = data.setdefault("entries", [])
+    state = data.setdefault("alert_state", {})
+    current = now()
+
+    latest_handover = None
+    # Stare wpisy z wcześniejszej wersji mogły mieć mniej niż 140 baterii.
+    # Do zegara 4h15 liczymy wyłącznie ostatnią płatną przekładkę: minimum 140 baterii, bez górnego limitu.
+    for entry in reversed(entries):
+        inserted = int(entry.get("total_inserted", 0) or 0)
+        full_loads, _ = warehouse_handover_payment(inserted)
+        if full_loads:
+            latest_handover = _parse_iso_dt(entry.get("created_at"))
+            if latest_handover is not None:
+                break
+
+    last_alert = _parse_iso_dt(state.get("last_alert_at"))
+    anchor = _parse_iso_dt(state.get("anchor_at"))
+
+    # Pierwsze uruchomienie: zaczynamy od teraz, zamiast wysyłać alert natychmiast.
+    if latest_handover is None and last_alert is None and anchor is None:
+        state["anchor_at"] = current.isoformat()
+        data["alert_state"] = state
+        save_warehouse_handovers(data)
+        return False
+
+    candidates = [dt for dt in (latest_handover, last_alert, anchor) if dt is not None]
+    if not candidates:
+        state["anchor_at"] = current.isoformat()
+        data["alert_state"] = state
+        save_warehouse_handovers(data)
+        return False
+
+    base = max(candidates)
+    due_at = base + timedelta(minutes=WAREHOUSE_HANDOVER_ALERT_MINUTES)
+    if current < due_at:
+        return False
+
+    group_id = load_group().get("chat_id")
+    text = warehouse_handover_alert_text()
+    sent_anywhere = False
+
+    # Główna wiadomość na wspólnej grupie — dociera do całej grupy.
+    if group_id:
+        try:
+            await app.bot.send_message(chat_id=group_id, text=text)
+            sent_anywhere = True
+        except Exception as exc:
+            print("warehouse_handover group alert error:", exc)
+
+    # Dodatkowo próbujemy prywatnie do zapisanych kierowców.
+    # Telegram może odmówić, jeśli kierowca nigdy nie otworzył rozmowy z botem.
+    private_ok = 0
+    for driver_chat_id in known_driver_private_chat_ids():
+        try:
+            await app.bot.send_message(chat_id=driver_chat_id, text=text)
+            private_ok += 1
+            sent_anywhere = True
+        except Exception:
+            pass
+
+    # Jeżeli nie ma jeszcze ustawionej grupy i żadna prywatna wiadomość nie przeszła,
+    # nie przesuwamy zegara — po ustawieniu grupy alert będzie mógł wyjść od razu.
+    if not sent_anywhere:
+        return False
+
+    state["last_alert_at"] = current.isoformat()
+    state["last_alert_private_ok"] = private_ok
+    state["last_alert_group"] = bool(group_id)
+    data["alert_state"] = state
+    save_warehouse_handovers(data)
+    audit_log(
+        "warehouse_handover_auto_alert",
+        details={
+            "group_id": group_id,
+            "private_ok": private_ok,
+            "interval_minutes": WAREHOUSE_HANDOVER_ALERT_MINUTES,
+        },
+    )
+    return True
+
+
+async def warehouse_handover_alert_scheduler(app: Application):
+    while True:
+        try:
+            await warehouse_handover_alert_tick(app)
+        except Exception as exc:
+            print("warehouse_handover_alert_scheduler error:", exc)
+        await asyncio.sleep(60)
+
+
 async def charging_scheduler(app: Application):
     while True:
         try:
@@ -6311,6 +6975,7 @@ async def post_init(app: Application):
     asyncio.create_task(charging_scheduler(app))
     asyncio.create_task(driver_alerts(app))
     asyncio.create_task(weekly_report_scheduler(app))
+    asyncio.create_task(warehouse_handover_alert_scheduler(app))
 
 
 # FINAL_BRAND_COMPANY_BRIDGE
@@ -6430,11 +7095,17 @@ def status_report():
         total = int(c.get("total", 0) or 0)
         ready = int(c.get("ready", 0) or 0)
         transit = active_in_transit_by_company(key)
-        waiting = max(0, total - ready - transit)
+        if c.get("warehouse_snapshot_at"):
+            charging = max(0, int(c.get("charging", 0) or 0))
+            waiting = max(0, int(c.get("waiting", 0) or 0))
+        else:
+            charging = 0
+            waiting = max(0, total - ready - transit)
 
         lines.append(label)
         lines.append(f"📦 Ilość: {total}")
         lines.append(f"✅ Gotowe: {ready}")
+        lines.append(f"🔋 Włożone do ładowania: {charging}")
 
         if key == "voi":
             ready_e4, ready_e5, _, untyped, configured = voi_ready_breakdown(c)
@@ -6456,6 +7127,10 @@ def status_report():
                 lines.append(f"• {name}: {qty} baterii")
         lines.append("")
 
+    latest_handover = warehouse_latest_snapshot_text()
+    if latest_handover:
+        lines += ["", latest_handover]
+
     return "\n".join(lines).rstrip()
 
 
@@ -6475,7 +7150,8 @@ def set_company_simple_field(company, field_raw, value):
     else:
         return None
 
-    # stare pola zerujemy, żeby nie mieszały w innych fragmentach kodu
+    # Ręczna komenda ILOSC/GOTOWE wraca do prostego trybu bez pełnego snapshotu.
+    c.pop("warehouse_snapshot_at", None)
     c["charging"] = 0
     c["waiting"] = max(0, int(c.get("total", 0) or 0) - int(c.get("ready", 0) or 0) - active_in_transit_by_company(comp))
 
@@ -6698,8 +7374,12 @@ def brand_item(inv, brand):
     item.setdefault("ready", 0)
     if comp == "voi":
         ensure_voi_ready_fields(item)
-    item["charging"] = 0
-    item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
+    if item.get("warehouse_snapshot_at"):
+        item.setdefault("charging", 0)
+        item.setdefault("waiting", 0)
+    else:
+        item["charging"] = 0
+        item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
     return item
 
 
@@ -6711,12 +7391,16 @@ def manual_inventory_total_from_brands(inv):
         item.setdefault("ready", 0)
         if comp == "voi":
             ensure_voi_ready_fields(item)
-        item["charging"] = 0
-        item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
+        if item.get("warehouse_snapshot_at"):
+            item.setdefault("charging", 0)
+            item.setdefault("waiting", 0)
+        else:
+            item["charging"] = 0
+            item["waiting"] = max(0, int(item.get("total", 0) or 0) - int(item.get("ready", 0) or 0) - active_in_transit_by_company(comp))
 
     inv["depot_total"] = sum(int(companies[b].get("total", 0)) for b in ["lima", "voi"])
     inv["ready"] = sum(int(companies[b].get("ready", 0)) for b in ["lima", "voi"])
-    inv["charging"] = 0
+    inv["charging"] = sum(int(companies[b].get("charging", 0) or 0) for b in ["lima", "voi"])
     inv["waiting"] = sum(int(companies[b].get("waiting", 0)) for b in ["lima", "voi"])
     return inv
 
